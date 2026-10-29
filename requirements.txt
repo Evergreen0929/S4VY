@@ -1,0 +1,25 @@
+# S4VY segmenter — Python dependencies.
+# Reference container: nvcr.io PyTorch 24.10 (py3). torch/torchvision are CUDA
+# builds: install the wheels matching your CUDA, e.g. cu124 for the pins below.
+torch==2.5.0
+torchvision==0.20.0
+numpy==2.2.6
+scipy==1.15.3
+Pillow==11.3.0
+opencv-python==4.13.0
+PyYAML==6.0.3
+einops==0.8.2
+imageio==2.37.3
+tqdm==4.67.3
+pycocotools
+wandb==0.27.0
+huggingface_hub
+matplotlib
+#
+# Optional, only for the opt-in learnable-upsampler branches in the mask-feature
+# head (anyup_enable / hr_upsampler="uplift"); both are external repos, not on PyPI:
+#   AnyUp   -> import path `anyup.model`
+#   UPLiFT  -> import path `uplift.uplift`  (also needs `omegaconf`)
+#
+# NOTE: the VGGT-Omega backbone is an EXTERNAL dependency (not pip-installed) —
+# clone it separately and set VGGT_OMEGA_ROOT (see README and env.example.sh).

@@ -1,0 +1,98 @@
+# Prompt encoder for S4VY. The segmenter (backbone + LoRA + decoder + mask head) is FROZEN;
+# only the prompt encoder trains, so the 400 static query outputs stay bit-identical.
+#
+# Point and box prompts, multi-point and multi-box, sampled online from GT masklets over the full
+# pool (all segmentation subsets + video + dl3dv/matterport offline pseudo). LR 3e-4, single node.
+model:
+  ckpt_path: /PATH/TO/checkpoints/VGGT-Omega/vggt_omega_1b_512.pt
+  load_pretrained: true
+  num_queries: 400
+  num_dec_layers: 9
+  mask_dim: 256
+  dec_dim: 256
+  grad_checkpointing: true
+  mask_feat_ratio: 4
+  lora_rank: 256
+  lora_alpha: 256.0
+  prompt_arch: v1lp
+  prompt_init_gain_content: 25.0        # v1lp init-scale fix (the v1lp basin)
+  prompt_init_gain_pos: 17.0
+
+data:                                   # FULL prompt pool (= s4vy_joint prompt task): static + all video + pseudo
+  root: /PATH/TO/data/InsScene-15K
+  subsets: [infinigen, scannetpp_v2, re10k]
+  video_subsets: [vipseg, cityscapes, kitti, jrdb,
+                  ytvos, davis, lvos, mose, mevis, sail, vost, uvo, dynrep, podyssey, mvssynth, spring, savx,
+                  dl3dv, matterport]
+  video_split: train
+  min_frames: 8
+  max_frames: 16
+  resolution: 512
+  frame_sampling: random
+  sparse_window_mult: 8
+  split: all
+  test_frac: 0.0
+  augment: true
+  aspect_resize: true
+  pseudo_prompt_root: /PATH/TO/data/prompt_pseudo_active
+  pseudo_prompt_subsets: [dl3dv, matterport]
+  sampling_weights:
+    infinigen: 1.0
+    scannetpp_v2: 1.0
+    re10k: 1.0
+    vipseg: 1.0
+    cityscapes: 1.0
+    kitti: 1.0
+    jrdb: 1.0
+    ytvos: 1.0
+    davis: 1.0
+    lvos: 1.0
+    mose: 1.0
+    mevis: 1.0
+    sail: 1.0
+    vost: 1.0
+    uvo: 1.0
+    dynrep: 1.0
+    podyssey: 1.0
+    mvssynth: 1.0
+    spring: 1.0
+    savx: 1.0
+    dl3dv: 0.0536                        # V2 chunk store, mass-preserving (offline pseudo -> down-weighted)
+    matterport: 0.3
+
+loss:
+  w_mask: 5.0
+  w_dice: 5.0
+  w_iou: 5.0                             # unused by v1lp (no IoU head); kept for engine API parity
+  num_points: 12544
+  aux_w: 0.4
+
+train:
+  batch_size: 1
+  num_workers: 16
+  total_steps: 15000
+  init_from: /PATH/TO/checkpoints/S4VY/s4vy/segomega_final.pt
+  lr_head: 3.0e-4
+  weight_decay: 0.05
+  warmup_frac: 0.05
+  grad_clip: 1.0
+  resume: auto
+  seed: 0
+  log_every: 20
+  save_every: 1500
+  viz_every: 999999
+  eval_every: 1000
+  eval_iggt_clips: 12
+  ckpt_dir: /PATH/TO/checkpoints/S4VY/s4vy_prompt
+  prompt:
+    max_objs: 4
+    p_box: 0.4
+    p_neg: 0.3
+    max_prompt_frames: null              # multipoint AND multibox (1..present frames), same as the v1lp ablation
+
+wandb:
+  enabled: true
+  project: segvggtomega
+  entity: YOUR_WANDB_ENTITY
+  run_name: s4vy_prompt
+  run_id: null

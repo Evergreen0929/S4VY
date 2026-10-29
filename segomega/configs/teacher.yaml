@@ -1,0 +1,84 @@
+# Frozen teacher for S4VY. Trained ONLY on 3D/4D pixel-exhaustive (panoptic) data, so every frame
+# supplies a clean no-object signal and there is no partial-label conflict. Architecture,
+# resolution and loading are identical to s4vy.yaml; only the data mix differs.
+#
+# Every scene AND clip is drawn at the same per-unit frequency (1 copy each), so no subset is
+# over- or under-sampled; `weight` is the number of copies in the flat item list.
+#   3D group: subset_sample_weights 1 -> 1 copy/scene -> 7500 items (infinigen + scannetpp + re10k)
+#   4D group: video_weights 1         -> 1 copy/clip  -> 3748 items (vipseg + cityscapes + kitti + jrdb)
+#   => 3D:4D ~= 2.0:1. UVO is excluded (object-exhaustive, not panoptic). Frames/views are random.
+#
+# 8 nodes x 8 GPUs = 64 GPUs, effective batch 64, LR scaled by sqrt(8).
+# This checkpoint is a training-time artifact: it is consumed by `ema_init_ckpt` in s4vy.yaml and
+# s4vy_joint.yaml and is not a released model.
+model:
+  ckpt_path: /PATH/TO/checkpoints/VGGT-Omega/vggt_omega_1b_512.pt
+  load_pretrained: true
+  num_queries: 400
+  num_dec_layers: 9
+  mask_dim: 256
+  dec_dim: 256
+  supervise_depth: false
+  supervise_camera: false
+  use_teacher: false
+  grad_checkpointing: true
+  finetune_mode: lora
+  mask_feat_ratio: 4
+  lora_rank: 256
+  lora_alpha: 256.0
+
+data:
+  root: /PATH/TO/data/InsScene-15K
+  subsets: [infinigen, scannetpp_v2, re10k]              # 3D static multi-view (pixel-exhaustive)
+  video_subsets: [vipseg, cityscapes, kitti, jrdb]       # 4D pixel-exhaustive panoptic ONLY (vipseg/cvps-exh/KITTI-STEP/JRDB-PanoTrack); jrdb joins at the next chain link
+
+  min_frames: 8
+  max_frames: 16
+  resolution: 512
+  frame_sampling: random
+  sparse_window_mult: 8                                  # KITTI: sample 8-16 frames across an 8x-larger window
+  split: all
+  test_frac: 0.0
+  # 3D:4D == 1:1, within-group natural (proportional) frequency, NO per-subset rebalancing:
+  subset_sample_weights: {infinigen: 1, scannetpp_v2: 1, re10k: 1}   # 1 copy/scene = natural freq (no rebalance)
+  video_weights: {vipseg: 1, cityscapes: 1, kitti: 1, jrdb: 1}             # 1 copy/clip = unit-freq aligned; 4D=3149+443+21+135=3748 clips, 3D:4D~2:1
+
+loss:
+  w_mask: 5.0
+  w_dice: 5.0
+  w_obj: 2.0
+  eos_coef: 0.1
+  num_points: 12544
+
+train:
+  batch_size: 1
+  num_workers: 8
+  total_steps: 50000
+  lr_backbone: 2.83e-5      # sqrt(8) x 1e-5  (eff_batch 8 -> 64)
+  lr_head: 5.66e-4          # sqrt(8) x 2e-4
+  weight_decay: 0.05
+  warmup_frac: 0.05         # 2500-step warmup
+  grad_clip: 1.0
+  resume: auto
+  log_every: 20
+  save_every: 500
+  ckpt_dir: /PATH/TO/checkpoints/S4VY/teacher
+
+eval:
+  enabled: true
+  eval_every: 2000
+  benchmark_root: /PATH/TO/data/IGGT_Benchmark
+  num_frames: 8
+  max_scenes: 200
+  n_viz: 4
+  num_workers: 4
+  iggt_modes: [tracking]                                 # IGGT 2D tracking (held-out)
+  # exhaustive training subsets (fit-monitor, same distribution) + davis/lvos as held-out zero-shot probes
+  video_benchmarks: [vipseg, cityscapes, kitti, jrdb, davis, lvos]
+
+wandb:
+  enabled: true
+  project: segvggtomega
+  entity: YOUR_WANDB_ENTITY
+  run_name: teacher
+  run_id: null

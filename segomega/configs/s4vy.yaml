@@ -1,0 +1,125 @@
+# S4VY -- the main segmenter. Distils a frozen exhaustive teacher (see teacher.yaml) into a
+# student trained on the full mixed pool, under a DYNAMIC exhaustive:non-exhaustive curriculum.
+#
+# The exhaustive:non-exhaustive mass ratio r(t) anneals linearly over steps [0, 50000]:
+#   r(0) = 0.1  (1:10 -- pseudo/VOS-heavy, noisy and diverse while the LR is high)
+#   r(T) = 2.0  (2:1  -- annealed onto the clean "segment-all" anchor)
+# Only non-exhaustive batches receive teacher pseudo-labels; exhaustive ones carry a real
+# no-object signal. Early under-segmentation is the failure mode to watch during the 1:10 phase.
+model:
+  ckpt_path: /PATH/TO/checkpoints/VGGT-Omega/vggt_omega_1b_512.pt
+  load_pretrained: true
+  num_queries: 400
+  num_dec_layers: 9
+  mask_dim: 256
+  dec_dim: 256
+  supervise_depth: false
+  supervise_camera: false
+  use_teacher: false
+  grad_checkpointing: true
+  finetune_mode: lora
+  mask_feat_ratio: 4
+  lora_rank: 256
+  lora_alpha: 256.0
+
+data:
+  root: /PATH/TO/data/InsScene-15K
+  subsets: [infinigen, scannetpp_v2, re10k]
+  video_subsets: [vipseg, cityscapes, kitti, jrdb,
+                  ytvos, davis, lvos, mose, mevis, sail, vost, uvo, dynrep, podyssey, mvssynth, spring, savx,
+                  dl3dv, matterport]
+  video_split: train
+  min_frames: 8
+  max_frames: 16
+  resolution: 512
+  frame_sampling: random
+  sparse_window_mult: 8
+  split: all
+  test_frac: 0.0
+  augment: false
+  dynamic_mix:                 # s4vy: exhaustive mass-ratio curriculum (overrides exhaustive weights below)
+    enable: true
+    exhaustive_subsets: [infinigen, scannetpp_v2, re10k, vipseg, cityscapes, kitti, jrdb]
+    r0: 0.1                    # 1:10 at step 0
+    r1: 2.0                    # 2:1 at 50k (= the earlier pseudo recipe endpoint)
+    mix_start: 0               # the earlier pseudo recipe trains FROM STEP 0 (config-header "resumes @6500" was stale) -> so do we
+    mix_end: 50000
+  sampling_weights:            # exhaustive : non-exhaustive = 2:1  (exhaustive weight 2.26 -> mass 24514 vs non-exh 12258)
+    infinigen: 2.26
+    scannetpp_v2: 2.26
+    re10k: 2.26
+    vipseg: 2.26
+    cityscapes: 2.26
+    kitti: 2.26
+    jrdb: 2.26
+    ytvos: 1.20
+    davis: 1.20
+    lvos: 1.20
+    mose: 1.20
+    mevis: 1.20
+    sail: 1.20
+    vost: 1.20
+    uvo: 1.20
+    dynrep: 1.20
+    podyssey: 1.20
+    mvssynth: 1.20
+    spring: 1.20
+    savx: 0.36
+    dl3dv: 0.10           # pure-pseudo (no GT), down 0.3 -> 0.1 (under-seg suspect)
+    matterport: 0.10      # pure-pseudo (no GT), down 0.3 -> 0.1
+
+loss:
+  w_mask: 5.0
+  w_dice: 5.0
+  w_obj: 2.0
+  eos_coef: 0.1
+  num_points: 12544
+  pseudo_weight: 0.5
+
+train:
+  batch_size: 1
+  num_workers: 16
+  persistent_workers: true
+  prefetch_factor: 2
+  total_steps: 50000
+  lr_backbone: 2.83e-5
+  lr_head: 5.66e-4
+  weight_decay: 0.05
+  warmup_frac: 0.05
+  grad_clip: 1.0
+  resume: auto
+  log_every: 20
+  save_every: 500
+  ckpt_dir: /PATH/TO/checkpoints/S4VY/s4vy
+  seed: 0
+  ema_pseudo: true
+  ema_init_ckpt: /PATH/TO/checkpoints/S4VY/teacher/segomega_50000.pt
+  ema_momentum: 0.9999
+  ema_update_start: 50001       # FROZEN teacher = teacher for the whole run (moving collapses)
+  pseudo_start: 0
+  teacher_framepos: true
+  pseudo_obj_thr: 0.7           # << THREE-BAND positive threshold: obj>0.7 supervise
+  pseudo_three_band: true       # << 0.3<obj<=0.7 IGNORE (not supervised, not ∅); obj<0.3 ∅-suppressed
+  pseudo_ignore_lo: 0.3
+  pseudo_no_exh_flip: false     # ∅ ON outside the ignore band (needed so obj<0.3 / empty gets suppressed)
+  pseudo_max_area_frac: 1.01    # kept as the frozen base (frozen teacher doesn't emit full-frame blobs)
+  ema_persist: false
+
+eval:
+  enabled: true
+  eval_every: 2000
+  benchmark_root: /PATH/TO/data/IGGT_Benchmark
+  num_frames: 8
+  max_scenes: 200
+  n_viz: 4
+  num_workers: 4
+  iggt_modes: [tracking]
+  video_split: val
+  video_benchmarks: [vipseg, cityscapes, kitti, davis, lvos]
+
+wandb:
+  enabled: true
+  project: segvggtomega
+  entity: YOUR_WANDB_ENTITY
+  run_name: s4vy
+  run_id: null

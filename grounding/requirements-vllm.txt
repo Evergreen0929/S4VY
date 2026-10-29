@@ -1,0 +1,3 @@
+# Optional dependency for vllm_box_backend.py / CoT serving only.
+-r requirements.txt
+vllm>=0.10,<1

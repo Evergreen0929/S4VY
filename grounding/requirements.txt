@@ -1,0 +1,12 @@
+# Grounder / critic additions on top of ../requirements.txt.
+# Match torch/torchvision to the cluster CUDA image; do not let pip replace the
+# image-provided CUDA build.
+transformers>=4.57,<5
+accelerate>=1.10,<2
+deepspeed>=0.17,<1
+peft>=0.17,<1
+qwen-vl-utils>=0.0.14
+sentencepiece
+safetensors
+requests
+open_clip_torch   # only for grounding/clip_embed.py (CLIP baseline embeddings)

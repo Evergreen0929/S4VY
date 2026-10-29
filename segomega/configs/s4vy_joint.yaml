@@ -1,0 +1,149 @@
+# S4VY-J -- the from-scratch joint variant (the paper's reference rows). Trains class-agnostic
+# exhaustive segmentation and point/box prompt segmentation in one run, alternating by global-step
+# parity (DDP branch-synced), 8 nodes x 50k steps.
+#
+#   even steps -- exhaustive task: the teacher's data mix (3 static + 4 exhaustive panoptic video),
+#                 supervised by SetCriterion.
+#   odd steps  -- prompt task: all segmentation subsets at weight 1; dl3dv/matterport fall back to
+#                 offline pseudo id-maps (conf >= 0.7, top-24 per clip), down-weighted to 0.3.
+#
+# The supervision mix steps 1:1 -> 2:1 -> 5:1 at steps 19,500 and 40,000.
+# exh_aux_weight=0.5 also applies Hungarian + no-object to the static-400 outputs on exhaustive
+# prompt steps, raising no-object coverage from 50% to ~77% of steps; without it the model grows
+# boundary-shell false positives.
+model:
+  ckpt_path: /PATH/TO/checkpoints/VGGT-Omega/vggt_omega_1b_512.pt
+  load_pretrained: true
+  num_queries: 400
+  num_dec_layers: 9
+  mask_dim: 256
+  dec_dim: 256
+  supervise_depth: false
+  supervise_camera: false
+  use_teacher: false
+  grad_checkpointing: true
+  finetune_mode: lora
+  mask_feat_ratio: 4
+  lora_rank: 256
+  lora_alpha: 256.0
+  prompt_arch: v1lp
+  prompt_init_gain_content: 25.0
+  prompt_init_gain_pos: 17.0
+
+data:                                    # EXHAUSTIVE task = teacher data, unit frequency ("option B")
+  root: /PATH/TO/data/InsScene-15K
+  subsets: [infinigen, scannetpp_v2, re10k]
+  video_subsets: [vipseg, cityscapes, kitti, jrdb]
+  video_split: train
+  min_frames: 8
+  max_frames: 16
+  resolution: 512
+  frame_sampling: random
+  sparse_window_mult: 8
+  split: all
+  test_frac: 0.0
+  augment: true
+  sampling_weights: {infinigen: 1.0, scannetpp_v2: 1.0, re10k: 1.0, vipseg: 1.0, cityscapes: 1.0, kitti: 1.0, jrdb: 1.0}
+
+loss:
+  w_mask: 5.0
+  w_dice: 5.0
+  w_obj: 2.0
+  eos_coef: 0.1
+  num_points: 12544
+
+train:
+  batch_size: 1
+  num_workers: 16
+  persistent_workers: true
+  prefetch_factor: 2
+  total_steps: 50000
+  lr_backbone: 2.83e-5
+  lr_head: 5.66e-4
+  weight_decay: 0.05
+  warmup_frac: 0.05
+  grad_clip: 1.0
+  resume: auto
+  log_every: 20
+  save_every: 500
+  ckpt_dir: /PATH/TO/checkpoints/S4VY/s4vy_joint
+  seed: 0
+  eval_clips_per_bench: 12               # prompt eval: 12 clips per video bench (vipseg/cityscapes/kitti)
+  eval_iggt_clips: 12                    # prompt eval: 12 IGGT tracking clips
+  joint_prompt:
+    enable: true
+    exh_aux_weight: 0.5      # s4vy_joint ∅-density fix (0 = behavior)
+    # One prompt step every N global steps. Resume is safe: the engine selects the row from the restored step.
+    prompt_schedule:
+      - {start_step: 0,     prompt_every: 2}  # 1:1 exhaustive:prompt
+      - {start_step: 19500, prompt_every: 3}  # 2:1
+      - {start_step: 40000, prompt_every: 6}  # 5:1
+
+    data:                                # PROMPT task pool = ALL seg subsets, weight 1 (pseudo lower)
+      root: /PATH/TO/data/InsScene-15K
+      subsets: [infinigen, scannetpp_v2, re10k]
+      video_subsets: [vipseg, cityscapes, kitti, jrdb,
+                      ytvos, davis, lvos, mose, mevis, sail, vost, uvo, dynrep, podyssey, mvssynth, spring, savx,
+                      dl3dv, matterport]
+      video_split: train
+      min_frames: 8
+      max_frames: 16
+      augment: true
+      sparse_window_mult: 8
+      # v2 SWAP (user-approved 2026-07-19, ~step 20.9k link boundary): active/ = symlinks {dl3dv->v2 chunk
+      # store 53,968 units, matterport->v1}. dl3dv weight 0.3->0.0536 keeps subset mass EXACTLY 2895 (=v1).
+      pseudo_prompt_root: /PATH/TO/data/prompt_pseudo_active
+      pseudo_prompt_subsets: [dl3dv, matterport]
+      sampling_weights:
+        infinigen: 1.0
+        scannetpp_v2: 1.0
+        re10k: 1.0
+        vipseg: 1.0
+        cityscapes: 1.0
+        kitti: 1.0
+        jrdb: 1.0
+        ytvos: 1.0
+        davis: 1.0
+        lvos: 1.0
+        mose: 1.0
+        mevis: 1.0
+        sail: 1.0
+        vost: 1.0
+        uvo: 1.0
+        dynrep: 1.0
+        podyssey: 1.0
+        mvssynth: 1.0
+        spring: 1.0
+        savx: 1.0
+        dl3dv: 0.0536         # V2 chunk store, mass-preserving (0.3*9649/53968)
+        matterport: 0.3       # OFFLINE pseudo -> lower weight
+    prompt:
+      max_objs: 4
+      p_box: 0.4
+      p_neg: 0.3
+      max_prompt_frames: null            # multipoint AND multibox: 1..present frames (v1lpn recipe)
+      noise_aug: 0.05                    # reduced from 0.1
+    loss:
+      w_mask: 5.0
+      w_dice: 5.0
+      num_points: 12544
+      aux_w: 0.4
+
+eval:
+  enabled: true
+  eval_every: 2000
+  benchmark_root: /PATH/TO/data/IGGT_Benchmark
+  num_frames: 8
+  max_scenes: 200
+  n_viz: 4
+  num_workers: 4
+  iggt_modes: [tracking]
+  video_split: val
+  video_benchmarks: [vipseg, cityscapes, kitti, davis, lvos]
+
+wandb:
+  enabled: true
+  project: segvggtomega
+  entity: YOUR_WANDB_ENTITY
+  run_name: s4vy_joint
+  run_id: null
