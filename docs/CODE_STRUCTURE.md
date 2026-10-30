@@ -29,7 +29,7 @@ rows. It is trained by the same entry point with a different config.
 | `train_segmenter.py` | training entry point for `teacher`, `s4vy`, `s4vy_joint` |
 | `train_prompt.py` | training entry point for `s4vy_prompt` |
 | `infer_segmenter.py` | class-agnostic 4D inference over a clip directory |
-| `grounding/agent_model.py` | dual-stream grounder on top of Qwen3-VL |
+| `grounding/agent_model.py` | dual-stream grounder on top of [Qwen3-VL](https://github.com/QwenLM/Qwen3-VL) |
 | `grounding/grounder_infer.py` | grounder inference, **including Active Tree Search (`mf_tree_windows`)** |
 | `grounding/train_agent.py` | grounder trainer |
 | `grounding/train_critic.py` | critic trainer |

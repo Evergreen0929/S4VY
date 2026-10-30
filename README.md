@@ -17,7 +17,7 @@ Jingdong Zhang, Xin Li, Jan Kautz, Wenping Wang, Chris Choy
 
 Two stages that can be used independently or chained:
 
-**Segmenter** — a query-based decoder on a LoRA-tuned VGGT-Omega backbone. 400 persistent
+**Segmenter** — a query-based decoder on a LoRA-tuned [VGGT-Ω](https://github.com/facebookresearch/vggt-omega) backbone. 400 persistent
 object queries produce class-agnostic masks for every object in the scene, from ordered
 video or from sparse, non-consecutive views. A prompt encoder matches point/box prompts
 to the corresponding object query.
@@ -52,8 +52,10 @@ cp grounding/env.example.sh grounding/env.sh && $EDITOR grounding/env.sh
 
 `grounding/requirements-vllm.txt` is only needed for the vLLM serving utilities.
 
-The VGGT-Omega backbone is a separate upstream dependency and is not redistributed here;
-obtain it and accept its license before training or inference.
+[VGGT-Ω](https://github.com/facebookresearch/vggt-omega) (Wang et al.,
+[arXiv:2605.15195](https://arxiv.org/abs/2605.15195)) is a separate upstream dependency and is not
+redistributed here. Obtain it and accept its licence before training or inference, and point
+`VGGT_OMEGA_ROOT` at the checkout.
 
 ## Weights
 
@@ -64,8 +66,8 @@ Released at [huggingface.co/jdzhang0929/S4VY](https://huggingface.co/jdzhang0929
 | `segmenter/s4vy.pt` | **S4VY** — the segmenter behind every headline number |
 | `segmenter/s4vy_prompt.pt` | prompt encoder for point/box prompts |
 | `segmenter/s4vy_joint.pt` | S4VY-J, the from-scratch reference variant |
-| `grounder/full_model.pt` | Qwen3-VL-4B dual-stream grounder |
-| `critic/full_model.pt` | Qwen3-VL-2B critic |
+| `grounder/full_model.pt` | dual-stream grounder, on [Qwen3-VL-4B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct) |
+| `critic/full_model.pt` | critic, on [Qwen3-VL-2B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct) |
 
 Grounding results use the 4B grounder with the 2B critic.
 
@@ -115,12 +117,11 @@ a signed agreement. `docs/DATA.md` lists every source, its license, and how to o
 The code in this repository is released under the
 [NVIDIA Source Code License-NC](LICENSE) — noncommercial research use only.
 
-It is our own implementation and does not redistribute any upstream source. The VGGT-Omega
-backbone and the Qwen3-VL base models are external dependencies that you obtain and accept
-separately.
+It is our own implementation and does not redistribute any upstream source. The VGGT-Ω backbone
+and the Qwen3-VL base models are external dependencies that you obtain and accept separately.
 
 **The released weights are licensed differently and more restrictively.** The segmenter
-checkpoints contain VGGT-Omega weights and are therefore distributed under the FAIR
+checkpoints contain VGGT-Ω weights and are therefore distributed under the FAIR
 Noncommercial Research License, which permits redistribution only under its own terms; the
 grounder and critic checkpoints contain Qwen3-VL weights under Apache-2.0. See the
 [weights repository](https://huggingface.co/jdzhang0929/S4VY) for the per-file breakdown.
