@@ -1,7 +1,8 @@
 # S4VY: Segment Anything in Feed-Forward 4D Visual Geometry
 
 [![Paper](https://img.shields.io/badge/arXiv-2609.36875-b31b1b.svg)](https://arxiv.org/abs/2609.36875)
-[![License](https://img.shields.io/badge/License-CC%20BY--NC%204.0-lightgrey.svg)](LICENSE)
+[![License](https://img.shields.io/badge/Code-NVIDIA%20Source%20Code%20License--NC-76b900.svg)](LICENSE)
+[![Weights](https://img.shields.io/badge/Weights-FAIR%20NC%20%2B%20Apache--2.0-lightgrey.svg)](https://huggingface.co/jdzhang0929/S4VY)
 
 Official implementation of **S4VY**, a promptable instance segmentation model built on
 feed-forward 4D visual geometry. S4VY turns RGB observations into class-agnostic 4D
