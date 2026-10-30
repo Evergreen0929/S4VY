@@ -30,12 +30,15 @@ from huggingface_hub import hf_hub_download
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # reuse the grounding primitives; GROUNDING_SRC lets you point at a configured checkout
 sys.path.insert(0, os.environ.get("GROUNDING_SRC", os.path.join(REPO, "grounding")))
+sys.path.insert(0, REPO)                                   # for segomega.*
+from segomega.engine.decode import edge_snap               # noqa: E402  (after the path insert)
 HF = "jdzhang0929/S4VY"
 GROUNDER_CKPT = "grounder/full_model.pt"       # the 4B dual-stream grounder
 CRITIC_CKPT = "critic/full_model.pt"          # the 2B critic
 
-_rng = np.random.RandomState(0)
-PAL = ((_rng.rand(1024, 3) * 0.7 + 0.3) * 255).astype(np.uint8); PAL[0] = 0
+# One expression resolves to one object, so the overlay uses a single fixed highlight rather than
+# an instance palette -- a per-instance colour would imply a distinction that is not being made.
+HILITE = np.array([60, 230, 90], np.float32)
 
 
 def load_frames(path, maxf, long_side=512):
@@ -69,7 +72,7 @@ def overlay_mp4(origs, idmap, out_path, fps=8.0):
         o = origs[f].astype(np.float32).copy()
         m = idmap[f].astype(bool)
         if m.any():
-            o[m] = 0.5 * origs[f][m] + 0.5 * PAL[1]
+            o[m] = 0.45 * origs[f][m] + 0.55 * HILITE
         vw.write(cv2.cvtColor(o.astype(np.uint8), cv2.COLOR_RGB2BGR))
     vw.release()
 
@@ -174,7 +177,7 @@ def main():
                                         IN_W, IN_H, up=lambda m, hw: m, jf=lambda a, b: (0., 0.),
                                         tag="demo", return_mask=True)
     mB = np.zeros_like(mA) if mBox is None else (mBox.astype(bool) if mBox.shape[1:] == mA.shape[1:] else
-        np.stack([cv2.resize(m.astype(np.uint8), (mA.shape[2], mA.shape[1]), interpolation=cv2.INTER_NEAREST).astype(bool) for m in mBox]))
+        np.stack([cv2.resize(m.astype(np.float32), (mA.shape[2], mA.shape[1]), interpolation=cv2.INTER_LINEAR) > 0.5 for m in mBox]))
     if len(mB) != len(mA):
         t = np.zeros_like(mA); t[:min(len(t), len(mB))] = mB[:min(len(t), len(mB))]; mB = t
 
@@ -193,7 +196,14 @@ def main():
     # upsample the chosen masklet to original resolution and write the overlay
     os.makedirs(args.out, exist_ok=True)
     Ho, Wo = imgs.shape[1:3]
-    up_final = np.stack([cv2.resize(m.astype(np.uint8), (Wo, Ho), interpolation=cv2.INTER_NEAREST).astype(bool) for m in final[:S]])
+    # Upsample the soft mask and threshold afterwards, then re-cut along the image edges -- the same
+    # treatment forward_video.py gives its masks. Thresholding first and resizing the binary mask with
+    # INTER_NEAREST leaves visible stair-stepping at the output resolution.
+    up_final = np.stack([
+        edge_snap(
+            (cv2.resize(m.astype(np.float32), (Wo, Ho), interpolation=cv2.INTER_LINEAR) > 0.5).astype(np.int32),
+            imgs[i]).astype(bool)
+        for i, m in enumerate(final[:S])])
     name = os.path.splitext(os.path.basename(args.video))[0]
     overlay_mp4(imgs, up_final, os.path.join(args.out, f"{name}_grounded.mp4"))
     np.savez_compressed(os.path.join(args.out, f"{name}_masklet.npz"), mask=up_final)

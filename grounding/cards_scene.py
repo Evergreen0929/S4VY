@@ -39,7 +39,14 @@ PK = int(os.environ.get("PROMPT_K", "5")); PICK = os.environ.get("PICK", "area")
 FR_CAP = int(os.environ.get("FR_CAP", "48"))
 SHARD = int(os.environ.get("SHARD", "0")); NSHARD = int(os.environ.get("NSHARD", "1"))
 MAG = np.array([255, 0, 255], np.float32)
-pm_model = load_model()
+pm_model = None
+
+
+def _load_models():                                        # see cards_video: import must stay model-free
+    global pm_model
+    if pm_model is None:
+        pm_model = load_model()
+
 
 
 def aabb_iou(a, b):
@@ -79,6 +86,7 @@ def pick_boxes(items):
 
 @torch.no_grad()
 def main():
+    _load_models()
     desc = {}
     for l in open(POOL):
         r = json.loads(l); desc[f"{r['scene']}__{r['oid']}__{r['ann']}"] = r

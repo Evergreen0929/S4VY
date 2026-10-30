@@ -4,11 +4,11 @@ so paper-aligned metrics (T-mIoU/T-SR/J&F via score_metrics.py) compare segmente
 import argparse, os, sys, glob, numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 os.environ.setdefault("VGGT_OMEGA_ROOT", "/PATH/TO/codebase/vggt-omega")
-import torch, torch.nn.functional as F
+import torch
 from PIL import Image
 from segomega.models import SegOmega
 from segomega.engine import setup_trainable
-from segomega.engine.decode import decode_instances
+from segomega.engine.decode import edge_snap, masks_to_idmap, model_input_hw
 
 CKPT = os.environ.get("S4VY_CKPT", "/PATH/TO/checkpoints/S4VY/s4vy/segomega_final.pt")
 OUT_NAME = os.environ.get("DUMP_NAME", "segmenter")   # <name>.npz per clip
@@ -26,21 +26,17 @@ def build():
 @torch.no_grad()
 def run(model, cdir):
     pngs = sorted(glob.glob(os.path.join(cdir, "frames", "*.png")))
-    imgs = torch.from_numpy(np.stack([np.asarray(Image.open(p).convert("RGB"), np.float32) / 255 for p in pngs])).permute(0, 3, 1, 2)
-    S, _, H, W = imgs.shape
+    origs = np.stack([np.asarray(Image.open(p).convert("RGB"), np.uint8) for p in pngs])
+    S, H, W = origs.shape[:3]
+    # The backbone needs its input capped and floored to a multiple of 16; feeding the exported frames
+    # at whatever size they happen to be is what this used to do.
+    Hr, Wr = model_input_hw(H, W)
+    x = np.stack([np.asarray(Image.fromarray(f).resize((Wr, Hr), Image.BILINEAR), np.float32) / 255 for f in origs])
+    imgs = torch.from_numpy(x).permute(0, 3, 1, 2)
     with torch.autocast("cuda", dtype=torch.bfloat16):
         preds = model(imgs.cuda().unsqueeze(0))
-    scores, masks = decode_instances(preds["objectness"], preds["mask_logits"], score_thr=0.3, mask_thr=0.5)[0]
-    if masks.numel() == 0:
-        idmap = np.zeros((S, H, W), np.int32); sc = np.zeros((0,), np.float32)
-    else:
-        up = F.interpolate(masks.float().reshape(-1, 1, *masks.shape[-2:]), size=(H, W), mode="nearest").reshape(masks.shape[0], S, H, W).bool().cpu().numpy()
-        sc = scores.float().cpu().numpy()
-        order = np.argsort([m.sum() for m in up])                # small first -> big overwrites
-        idmap = np.zeros((S, H, W), np.int32)
-        for newid, qi in enumerate(order, start=1):
-            idmap[up[qi]] = newid
-        sc = sc[order]
+    idmap, sc = masks_to_idmap(preds["objectness"], preds["mask_logits"], (H, W), score_thr=0.3)
+    idmap = np.stack([edge_snap(idmap[f], origs[f]) for f in range(S)])   # snap to image edges
     np.savez_compressed(os.path.join(cdir, f"{OUT_NAME}.npz"), idmap=idmap, scores=sc)
     return S, H, W, len(sc)
 

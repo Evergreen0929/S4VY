@@ -16,13 +16,12 @@ Requires VGGT_OMEGA_ROOT to point at the VGGT-Omega code repo (see segomega/path
 import os, sys, argparse
 os.environ.setdefault("SEG_NO_FRAMEPOS", "1")           # weights were trained with decoder frame_pos dropped
 import numpy as np, cv2, torch, torch.nn.functional as F
-from scipy.ndimage import uniform_filter
 from huggingface_hub import hf_hub_download
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))   # repo root
 from segomega.models import SegOmega
 from segomega.engine import setup_trainable
-from segomega.engine.decode import decode_instances
+from segomega.engine.decode import edge_snap, masks_to_idmap, model_input_hw
 
 WEIGHTS_REPO = "jdzhang0929/S4VY"
 WEIGHTS = {"s4vy": "segmenter/s4vy.pt", "joint": "segmenter/s4vy_joint.pt"}
@@ -31,31 +30,14 @@ _rng = np.random.RandomState(0)
 PAL = ((_rng.rand(1024, 3) * 0.7 + 0.3) * 255).astype(np.uint8); PAL[0] = 0   # instance colour palette
 
 
-def _gf(I, p, r=4, eps=1e-3):
-    """gray-guided filter: snap soft mask p to intensity edges of guide I (both HxW float[0,1])."""
-    mI = uniform_filter(I, 2 * r + 1); mp = uniform_filter(p, 2 * r + 1)
-    cov = uniform_filter(I * p, 2 * r + 1) - mI * mp
-    var = uniform_filter(I * I, 2 * r + 1) - mI * mI
-    a = cov / (var + eps); b = mp - a * mI
-    return np.clip(uniform_filter(a, 2 * r + 1) * I + uniform_filter(b, 2 * r + 1), 0, 1)
-
-
 def refine_and_overlay(idm, rgb, alpha=0.5):
-    """guided-filter RGB edge-snap each instance -> (hard idmap, rgb+mask overlay u8)."""
-    gray = rgb.astype(np.float32).mean(2) / 255.0
+    """Edge-snap each instance, then composite it -> (hard idmap, rgb+mask overlay u8)."""
+    hard = edge_snap(idm, rgb)
     over = rgb.astype(np.float32) / 255.0
-    ids = [int(i) for i in np.unique(idm) if i > 0]
-    if not ids:
-        return idm.astype(np.int32), (over * 255).astype(np.uint8)
-    ids.sort(key=lambda i: (idm == i).sum())                    # small first, big overwrites
-    best = np.full(idm.shape, 0.5, np.float32); out = np.zeros(idm.shape, np.int32)
-    for i in ids:
-        soft = _gf(gray, (idm == i).astype(np.float32))
-        soft = np.clip((soft - 0.30) / 0.45, 0, 1)              # mild contrast, keep feather band
-        m = soft > best; out[m] = i; best[m] = soft[m]
-        a = (soft * alpha)[..., None]
+    for i in [int(x) for x in np.unique(hard) if x > 0]:
+        a = (hard == i).astype(np.float32)[..., None] * alpha
         over = over * (1 - a) + (PAL[i % 1024].astype(np.float32) / 255.0) * a
-    return out, (over * 255).astype(np.uint8)
+    return hard, (over * 255).astype(np.uint8)
 
 
 def load_frames(path, n, long_side=512):
@@ -78,8 +60,7 @@ def load_frames(path, n, long_side=512):
         raise RuntimeError(f"no frames read from {path}")
     origs = np.stack([frames[k] for k in sorted(frames)])                       # (S,Ho,Wo,3)
     h0, w0 = origs.shape[1:3]
-    Wr, Hr = (long_side, round(h0 / w0 * long_side)) if w0 >= h0 else (round(w0 / h0 * long_side), long_side)
-    Wr = max(16, (Wr // 16) * 16); Hr = max(16, (Hr // 16) * 16)               # model floors to multiple of 16
+    Hr, Wr = model_input_hw(h0, w0, long_side)
     imgs = np.stack([cv2.resize(f, (Wr, Hr), interpolation=cv2.INTER_AREA) for f in origs]).astype(np.float32) / 255.
     return torch.from_numpy(imgs).permute(0, 3, 1, 2), origs
 
@@ -102,20 +83,10 @@ def build_model(which):
 
 @torch.no_grad()
 def forward_masks(model, imgs, out_hw):
-    """imgs (S,3,H,W) -> per-frame instance id map (S,Ho,Wo) upsampled to out_hw, background=0."""
-    S = imgs.shape[0]; Ho, Wo = out_hw
+    """imgs (S,3,H,W) -> per-frame instance id map (S,Ho,Wo), background = 0."""
     with torch.autocast("cuda", dtype=torch.bfloat16):
         s = model(imgs.cuda().unsqueeze(0))
-    scores, soft = decode_instances(s["objectness"], s["mask_logits"],
-                                    score_thr=0.3, mask_thr=0.5, return_soft=True)[0]
-    if soft.numel() == 0:
-        return np.zeros((S, Ho, Wo), np.int32)
-    up = (F.interpolate(soft.float().reshape(-1, 1, *soft.shape[-2:]), size=(Ho, Wo),
-                        mode="bilinear", align_corners=False).reshape(soft.shape[0], S, Ho, Wo) > 0.5).cpu().numpy()
-    idmap = np.zeros((S, Ho, Wo), np.int32)
-    for newid, qi in enumerate(np.argsort([m.sum() for m in up]), start=1):     # small first, big overwrites
-        idmap[up[qi]] = newid
-    return idmap
+    return masks_to_idmap(s["objectness"], s["mask_logits"], out_hw, score_thr=0.3)[0]
 
 
 def main():

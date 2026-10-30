@@ -33,10 +33,20 @@ MAG = np.array([255, 0, 255], np.float32)
 sys.path.insert(0, AG)
 import vidref_data as EV
 
-ag = AgentGrounder(_env.require("MODEL_PATH", "base Qwen3-VL checkout"), lora=False, loss="matching").cuda().eval()
-ag.load_state_dict(torch.load(f"{os.environ['CKPT']}/full_model.pt", map_location="cpu"), strict=False)
-proc = ag.processor
-pm_model = load_model()                                    # s4vy_prompt: box -> masklet
+# Loaded lazily by main(). `render` is pure compositing, and the inference entry points import it
+# for that alone -- building a second grounder and prompt model here would double their GPU use.
+ag = proc = pm_model = None
+
+
+def _load_models():
+    global ag, proc, pm_model
+    if ag is not None:
+        return
+    ag = AgentGrounder(_env.require("MODEL_PATH", "base Qwen3-VL checkout"), lora=False, loss="matching").cuda().eval()
+    ag.load_state_dict(torch.load(f"{_env.require('CKPT', 'directory holding the trained grounder')}/full_model.pt",
+                                  map_location="cpu"), strict=False)
+    proc = ag.processor
+    pm_model = load_model()                                # s4vy_prompt: box -> masklet
 
 
 _MD = [None]
@@ -144,6 +154,7 @@ def pick_boxes(items):
 
 @torch.no_grad()
 def main():
+    _load_models()
     want = None
     if POOL:
         want = {}

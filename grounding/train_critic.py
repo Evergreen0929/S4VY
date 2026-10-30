@@ -33,15 +33,23 @@ from transformers import AutoProcessor, AutoModelForImageTextToText
 D = os.environ.get("GROUNDING_DATA_ROOT", "/PATH/TO/data")
 CARDS = os.environ.get("CARDS", f"{D}/critic_cards_scanrefer")
 CARD_DIRS = [c for c in CARDS.split(":") if c]
-MODEL_PATH = _env.require("MODEL_PATH", "Qwen3-VL-2B-Instruct checkout for the critic")
-OUT_DIR = os.environ.get("OUT_DIR") or os.path.join(_env.require("AGENT_CKPT_ROOT", "checkpoint root"), "critic_2b")
+# Resolved lazily: the inference entry points import Critic from this module, and must not be
+# made to supply training paths just to construct the class.
+def model_path():
+    return _env.require("MODEL_PATH", "Qwen3-VL-2B-Instruct checkout for the critic")
+
+
+def out_dir():
+    d = os.environ.get("OUT_DIR") or os.path.join(_env.require("AGENT_CKPT_ROOT", "checkpoint root"), "critic_2b")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
 EPOCHS = int(os.environ.get("EPOCHS", "3")); LR = float(os.environ.get("LR", "5e-6"))
 BS = int(os.environ.get("BS", "1")); GA = int(os.environ.get("GRAD_ACC", "8"))
 TIE_FRAC = float(os.environ.get("TIE_FRAC", "0.30"))    # share of near-ties kept, for calibration
 TIE_THR = float(os.environ.get("TIE_THR", "0.10"))
 ALPHA = float(os.environ.get("ALPHA", "0.5"))           # extra weight for pairs that straddle 0.5
-os.makedirs(OUT_DIR, exist_ok=True)
-
 PROMPT = ('Two candidate objects are highlighted in magenta, one per image; each image shows three views of '
           'the same scene with the original frame beside the highlighted one.\nReferring expression: "{d}"\n'
           'Which candidate does the expression refer to?')
@@ -100,8 +108,7 @@ def build_pairs():
         def _h(k): return int(hashlib.md5(k.encode()).hexdigest()[:8], 16) / 0xFFFFFFFF
         test = [m for m in pairs if _h(m["key"]) < _ho]
         pairs = [m for m in pairs if _h(m["key"]) >= _ho]
-        os.makedirs(OUT_DIR, exist_ok=True)
-        with open(f"{OUT_DIR}/holdout_keys.json", "w") as f:
+        with open(f"{out_dir()}/holdout_keys.json", "w") as f:
             json.dump(sorted(m["key"] for m in test), f)
         print(f"[critic] held out {len(test)} pairs (key hash<{_ho}), train {len(pairs)} ", flush=True)
     if os.environ.get("CLS_BAL", "0") == "1":
@@ -214,7 +221,7 @@ def main():
         print(f"[critic] cards {ntot} -> train pairs {len(pairs)} (separable {nd} + near-tie {nt}); "
               f"pairs with both arms <0.5 dropped", flush=True)
     if not pairs: print("[critic] no training data"); return
-    model = Critic(MODEL_PATH)
+    model = Critic(model_path())
     dl = DataLoader(PairSet(pairs), batch_size=BS, shuffle=True, num_workers=4,
                     collate_fn=make_collate(model.proc))
     _hp = [p for n, p in model.named_parameters() if p.requires_grad and n.startswith("head.")]
@@ -243,12 +250,12 @@ def main():
         acc.wait_for_everyone()
         sd = acc.get_state_dict(model)
         if acc.is_main_process:
-            torch.save(sd, f"{OUT_DIR}/full_model.pt")
-            json.dump({"epoch": ep + 1, "step": step}, open(f"{OUT_DIR}/meta.json", "w"))
+            torch.save(sd, f"{out_dir()}/full_model.pt")
+            json.dump({"epoch": ep + 1, "step": step}, open(f"{out_dir()}/meta.json", "w"))
             print(f"[critic] saved @ep{ep+1}", flush=True)
     acc.wait_for_everyone()
     if acc.is_main_process:
-        open(f"{OUT_DIR}/DONE", "w").write("done")
+        open(f"{out_dir()}/DONE", "w").write("done")
         print("CRITIC_DONE", flush=True)
 
 
