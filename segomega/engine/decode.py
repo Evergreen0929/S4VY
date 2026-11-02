@@ -75,7 +75,7 @@ def masks_to_idmap(objectness, mask_logits, out_hw, score_thr=0.5, mask_thr=0.5,
     if soft.numel() == 0:
         return np.zeros((S, Ho, Wo), np.int32), np.zeros((0,), np.float32)
     up = (F.interpolate(soft.float().reshape(-1, 1, *soft.shape[-2:]), size=(Ho, Wo),
-                        mode="bilinear", align_corners=False).reshape(soft.shape[0], S, Ho, Wo) > 0.5)
+                        mode="bilinear", align_corners=False).reshape(soft.shape[0], S, Ho, Wo) > mask_thr)
     up = up.cpu().numpy()
     order = np.argsort([m.sum() for m in up])                    # small first, large overwrites
     idmap = np.zeros((S, Ho, Wo), np.int32)
