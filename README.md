@@ -100,6 +100,22 @@ python grounding/run_pipeline_video.py --grounder <g> --critic <c> ...   # video
 `demo/forward_video.py` and `demo/grounding_video.py` are self-contained: they pull the weights
 from Hugging Face and need only a video file.
 
+### Fast inference
+
+`infer_segmenter.py` and `demo/forward_video.py` take `--fast {off,exact,full}`
+(`segomega/engine/fast_inference.py`):
+
+- `exact` replaces the decoder's mask-to-attention bilinear downsample with an equivalent strided
+  form and (in `infer_segmenter.py`) replays a CUDA graph per repeated clip shape. Outputs are bitwise
+  identical to `off`.
+- `full` additionally merges the LoRA adapters, caches BF16 backbone weights and `torch.compile`s the
+  backbone blocks. Floating-point order changes, so a small fraction of pixels change instance.
+
+New clip shapes pay compilation in `full`. `infer_segmenter.py` caches graphs for two shapes;
+each cache miss pays warm-up and capture again, including after eviction. Graph replay benefits
+clips whose shapes repeat before eviction. For a single video use `demo/forward_video.py --fast exact`,
+which skips compilation and graph capture.
+
 ## What is not included
 
 The benchmark evaluation harness is not part of this release — the AP / IoU scoring, the
