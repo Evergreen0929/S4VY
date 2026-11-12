@@ -24,13 +24,13 @@ def build():
 
 
 @torch.no_grad()
-def run(model, cdir):
+def run(model, cdir, long_side="native"):
     pngs = sorted(glob.glob(os.path.join(cdir, "frames", "*.png")))
     origs = np.stack([np.asarray(Image.open(p).convert("RGB"), np.uint8) for p in pngs])
     S, H, W = origs.shape[:3]
     # The backbone needs its input capped and floored to a multiple of 16; feeding the exported frames
     # at whatever size they happen to be is what this used to do.
-    Hr, Wr = model_input_hw(H, W)
+    Hr, Wr = model_input_hw(H, W, long_side)
     x = np.stack([np.asarray(Image.fromarray(f).resize((Wr, Hr), Image.BILINEAR), np.float32) / 255 for f in origs])
     imgs = torch.from_numpy(x).permute(0, 3, 1, 2)
     with torch.autocast("cuda", dtype=torch.bfloat16):
@@ -41,9 +41,17 @@ def run(model, cdir):
     return S, H, W, len(sc)
 
 
+def long_side_arg(value):
+    return value if value == "native" else int(value)
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(); ap.add_argument("--root", default="/PATH/TO/data/baseline_eval")
-    ap.add_argument("--benches", default="iggt_tracking,davis,ytvos,vipseg"); args = ap.parse_args()
+    ap.add_argument("--benches", default="iggt_tracking,davis,ytvos,vipseg")
+    ap.add_argument("--input-long-side", type=long_side_arg, default="native",
+                    help='model input long side, up to 1024, or "native" (default) for the frames\' own size; '
+                         '512 is what this script used before')
+    args = ap.parse_args()
     model = build()
     for b in args.benches.split(","):
         cds = sorted(glob.glob(os.path.join(args.root, b, "clip_*")))
@@ -51,7 +59,7 @@ if __name__ == "__main__":
         if _mc > 0: cds = cds[:_mc]   # fast subset for quick probes
         for i, cd in enumerate(cds):
             try:
-                S, H, W, n = run(model, cd)
+                S, H, W, n = run(model, cd, args.input_long_side)
                 if i % 25 == 0: print(f"[{OUT_NAME} {b}] {i}/{len(cds)} S={S} {H}x{W} #inst={n}", flush=True)
             except Exception as e:
                 print(f"[{OUT_NAME} {b}] FAIL {cd}: {e}", flush=True)

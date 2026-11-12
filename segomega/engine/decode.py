@@ -7,6 +7,7 @@ The benchmark evaluation harness that produces the paper's numbers is not part o
 """
 from __future__ import annotations
 
+import math
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -53,8 +54,24 @@ def viz_idmap(preds, H, W, S, score_thr=0.5):
 # These live here rather than in each entry point: resolution handling and edge
 # snapping decide how good the released masks look, and three copies drifted apart.
 
+MAX_INPUT_LONG_SIDE = 1024
+MAX_INPUT_PIXELS = 1024 * 768
+
+
 def model_input_hw(h, w, long_side=512, mult=16):
-    """Input size the backbone expects: longest side capped, both sides floored to `mult`."""
+    """Input size the backbone expects: longest side capped, both sides floored to `mult`.
+
+    long_side is an integer up to MAX_INPUT_LONG_SIDE, or "native" to keep the frame's own size
+    (never enlarged, capped at MAX_INPUT_LONG_SIDE). Either way the input is held to
+    MAX_INPUT_PIXELS, so memory stays bounded whatever the aspect ratio.
+    """
+    if long_side == "native":
+        long_side = min(max(h, w), MAX_INPUT_LONG_SIDE)
+    if not isinstance(long_side, int) or not mult <= long_side <= MAX_INPUT_LONG_SIDE:
+        raise ValueError(f'long_side must be an integer in {mult}..{MAX_INPUT_LONG_SIDE} or "native"')
+    pixels = h * w * (long_side / max(h, w)) ** 2
+    if pixels > MAX_INPUT_PIXELS:
+        long_side = int(long_side * math.sqrt(MAX_INPUT_PIXELS / pixels))
     if w >= h:
         wr, hr = long_side, round(h / w * long_side)
     else:

@@ -95,7 +95,8 @@ def main():
     ap.add_argument("--out", required=True, help="output dir")
     ap.add_argument("--model", default="s4vy", choices=["s4vy", "joint"])
     ap.add_argument("--nframes", type=int, default=int(os.environ.get("NFRAMES", "80")))
-    ap.add_argument("--long_side", type=int, default=512)
+    ap.add_argument("--long_side", type=lambda v: v if v == "native" else int(v), default=512,
+                    help='model input long side, up to 1024, or "native" for the video\'s own size')
     args = ap.parse_args()
 
     imgs, origs = load_frames(args.video, args.nframes, args.long_side)

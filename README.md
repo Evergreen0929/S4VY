@@ -100,6 +100,12 @@ python grounding/run_pipeline_video.py --grounder <g> --critic <c> ...   # video
 `demo/forward_video.py` and `demo/grounding_video.py` are self-contained: they pull the weights
 from Hugging Face and need only a video file.
 
+`infer_segmenter.py` feeds frames to the model at their own size (`--input-long-side native`, the
+default; long side capped at 1024 and the input at 1024×768 pixels). Pass `--input-long-side 512`
+for the smaller input it used before: up to half the time and 60% of the memory, but lower accuracy
+on every benchmark except the two ScanNet ones. `demo/forward_video.py --long_side` takes the same
+values and still defaults to 512, since videos are often larger than the exported benchmark frames.
+
 ## What is not included
 
 The benchmark evaluation harness is not part of this release — the AP / IoU scoring, the
