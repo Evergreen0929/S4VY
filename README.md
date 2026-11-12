@@ -111,6 +111,25 @@ one model call. The saved masks replace the earlier area-ordered paint (P(object
 mask > 0.5) followed by a CPU `edge_snap`, which `infer_segmenter.py --decoder legacy`
 still produces. The demo applies `edge_snap` only to its display overlay, not its saved PNG masks.
 
+### Fast inference
+
+`infer_segmenter.py` and `demo/forward_video.py` take `--fast {off,exact,full}`
+(`segomega/engine/fast_inference.py`). `infer_segmenter.py` defaults to `full`; the demo defaults to
+`off`.
+
+- `exact` replaces the decoder's mask-to-attention bilinear downsample with an equivalent strided
+  form and (in `infer_segmenter.py`) replays a CUDA graph per repeated clip shape. Outputs are bitwise
+  identical to `off`.
+- `full` additionally merges the LoRA adapters into the backbone weights (in memory; the checkpoint
+  is unchanged), caches BF16 backbone weights and `torch.compile`s the backbone blocks.
+  Floating-point order changes, so a small fraction of pixels change instance; benchmark scores
+  stay within noise.
+
+New clip shapes pay compilation in `full` (seconds to tens of seconds). `infer_segmenter.py` caches
+graphs for two shapes; each cache miss pays warm-up and capture again, including after eviction.
+A shape whose graph does not fit in GPU memory runs compiled without one. For a single video,
+`demo/forward_video.py` skips graph capture, so compilation rarely pays off there; use `--fast exact`.
+
 ### Input resolution
 
 `infer_segmenter.py` feeds frames to the model at their own size (`--input-long-side native`, the
