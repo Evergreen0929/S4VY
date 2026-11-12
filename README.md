@@ -100,6 +100,25 @@ python grounding/run_pipeline_video.py --grounder <g> --critic <c> ...   # video
 `demo/forward_video.py` and `demo/grounding_video.py` are self-contained: they pull the weights
 from Hugging Face and need only a video file.
 
+### Decoding
+
+`infer_segmenter.py` and `demo/forward_video.py` decode with `masks_to_idmap_owned`
+(`segomega/engine/decode.py`), the decoder of the S4VY streaming service. Each frame's mask
+logits are upsampled bilinearly. Queries with P(object) > 0.1 and P(mask) > 0.65 at a pixel
+compete for it; the highest P(object) × P(mask) wins. Pixels with no eligible query are
+background. Ids are query index + 1, so an id names the same query across frames within
+one model call. The saved masks replace the earlier area-ordered paint (P(object) > 0.3,
+mask > 0.5) followed by a CPU `edge_snap`, which `infer_segmenter.py --decoder legacy`
+still produces. The demo applies `edge_snap` only to its display overlay, not its saved PNG masks.
+
+### Input resolution
+
+`infer_segmenter.py` feeds frames to the model at their own size (`--input-long-side native`, the
+default; long side capped at 1024 and the input at 1024×768 pixels). Pass `--input-long-side 512`
+for the smaller input it used before: up to half the time and 60% of the memory, but lower accuracy
+on every benchmark except the two ScanNet ones. `demo/forward_video.py --long_side` takes the same
+values and still defaults to 512, since videos are often larger than the exported benchmark frames.
+
 ## What is not included
 
 The benchmark evaluation harness is not part of this release — the AP / IoU scoring, the

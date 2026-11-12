@@ -21,7 +21,7 @@ from huggingface_hub import hf_hub_download
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))   # repo root
 from segomega.models import SegOmega
 from segomega.engine import setup_trainable
-from segomega.engine.decode import edge_snap, masks_to_idmap, model_input_hw
+from segomega.engine.decode import edge_snap, masks_to_idmap_owned, model_input_hw
 
 WEIGHTS_REPO = "jdzhang0929/S4VY"
 WEIGHTS = {"s4vy": "segmenter/s4vy.pt", "joint": "segmenter/s4vy_joint.pt"}
@@ -86,7 +86,7 @@ def forward_masks(model, imgs, out_hw):
     """imgs (S,3,H,W) -> per-frame instance id map (S,Ho,Wo), background = 0."""
     with torch.autocast("cuda", dtype=torch.bfloat16):
         s = model(imgs.cuda().unsqueeze(0))
-    return masks_to_idmap(s["objectness"], s["mask_logits"], out_hw, score_thr=0.3)[0]
+    return masks_to_idmap_owned(s["objectness"], s["mask_logits"], out_hw)[0]
 
 
 def main():
@@ -95,7 +95,8 @@ def main():
     ap.add_argument("--out", required=True, help="output dir")
     ap.add_argument("--model", default="s4vy", choices=["s4vy", "joint"])
     ap.add_argument("--nframes", type=int, default=int(os.environ.get("NFRAMES", "80")))
-    ap.add_argument("--long_side", type=int, default=512)
+    ap.add_argument("--long_side", type=lambda v: v if v == "native" else int(v), default=512,
+                    help='model input long side, up to 1024, or "native" for the video\'s own size')
     args = ap.parse_args()
 
     imgs, origs = load_frames(args.video, args.nframes, args.long_side)
@@ -112,8 +113,8 @@ def main():
     vw = cv2.VideoWriter(os.path.join(args.out, name + "_overlay.mp4"),
                          cv2.VideoWriter_fourcc(*"mp4v"), ov_fps, (Wo, Ho))
     for f in range(S):
-        hard, over = refine_and_overlay(idmap[f], origs[f])                     # edge-snap + overlay
-        cv2.imwrite(os.path.join(mdir, f"frame_{f:04d}.png"), hard.astype(np.uint16))
+        _, over = refine_and_overlay(idmap[f], origs[f])                        # edge-snap for display only
+        cv2.imwrite(os.path.join(mdir, f"frame_{f:04d}.png"), idmap[f].astype(np.uint16))
         vw.write(cv2.cvtColor(over, cv2.COLOR_RGB2BGR))
     vw.release()
     print(f"[demo] wrote {name}_overlay.mp4 ({S}f {Wo}x{Ho}, {ov_fps:.1f}fps) + masks/ ({S} png)", flush=True)
