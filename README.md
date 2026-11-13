@@ -97,6 +97,9 @@ python grounding/run_pipeline_scene.py --grounder <g> --critic <c> ...   # stati
 python grounding/run_pipeline_video.py --grounder <g> --critic <c> ...   # video
 ```
 
+To pick the decoder, input resolution and speed mode for your GPU, see
+[docs/INFERENCE.md](docs/INFERENCE.md): accuracy, speed and memory for each configuration.
+
 `demo/forward_video.py` and `demo/grounding_video.py` are self-contained: they pull the weights
 from Hugging Face and need only a video file.
 
