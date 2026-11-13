@@ -21,7 +21,8 @@ from huggingface_hub import hf_hub_download
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))   # repo root
 from segomega.models import SegOmega
 from segomega.engine import setup_trainable
-from segomega.engine.decode import edge_snap, masks_to_idmap, model_input_hw
+from segomega.engine.decode import edge_snap, masks_to_idmap_owned, model_input_hw
+from segomega.engine.fast_inference import optimize_for_inference, run
 
 WEIGHTS_REPO = "jdzhang0929/S4VY"
 WEIGHTS = {"s4vy": "segmenter/s4vy.pt", "joint": "segmenter/s4vy_joint.pt"}
@@ -65,7 +66,7 @@ def load_frames(path, n, long_side=512):
     return torch.from_numpy(imgs).permute(0, 3, 1, 2), origs
 
 
-def build_model(which):
+def build_model(which, fast="off"):
     w = hf_hub_download(WEIGHTS_REPO, WEIGHTS[which])          # bundles backbone + LoRA + decoder
     # s4vy_joint was trained jointly with the prompt branch, so its checkpoint carries a prompt
     # encoder; build it so every tensor in the checkpoint has a home.
@@ -78,15 +79,17 @@ def build_model(which):
     sd = torch.load(w, map_location="cpu")
     missing, unexpected = m.load_state_dict(sd.get("model", sd), strict=False)
     print(f"[demo] loaded {WEIGHTS[which]}  (missing={len(missing)} unexpected={len(unexpected)})", flush=True)
-    return m.cuda().eval()
+    m = m.cuda().eval()
+    if fast != "off":   # one forward per video: no CUDA graph, its capture would not be reused
+        print(f"[demo] fast inference: {optimize_for_inference(m, exact=(fast == 'exact'))}", flush=True)
+    return m
 
 
 @torch.no_grad()
 def forward_masks(model, imgs, out_hw):
     """imgs (S,3,H,W) -> per-frame instance id map (S,Ho,Wo), background = 0."""
-    with torch.autocast("cuda", dtype=torch.bfloat16):
-        s = model(imgs.cuda().unsqueeze(0))
-    return masks_to_idmap(s["objectness"], s["mask_logits"], out_hw, score_thr=0.3)[0]
+    s = run(model, imgs.cuda().unsqueeze(0))
+    return masks_to_idmap_owned(s["objectness"], s["mask_logits"], out_hw)[0]
 
 
 def main():
@@ -95,7 +98,10 @@ def main():
     ap.add_argument("--out", required=True, help="output dir")
     ap.add_argument("--model", default="s4vy", choices=["s4vy", "joint"])
     ap.add_argument("--nframes", type=int, default=int(os.environ.get("NFRAMES", "80")))
-    ap.add_argument("--long_side", type=int, default=512)
+    ap.add_argument("--long_side", type=lambda v: v if v == "native" else int(v), default=512,
+                    help='model input long side, up to 1024, or "native" for the video\'s own size')
+    ap.add_argument("--fast", default="off", choices=["off", "exact", "full"],
+                    help="exact: bitwise-identical speedups; full: also merged LoRA, BF16 weights, torch.compile")
     args = ap.parse_args()
 
     imgs, origs = load_frames(args.video, args.nframes, args.long_side)
@@ -103,7 +109,7 @@ def main():
     name = os.path.splitext(os.path.basename(args.video))[0]
     print(f"[demo] {name}: {S} frames, orig={Wo}x{Ho}", flush=True)
 
-    model = build_model(args.model)
+    model = build_model(args.model, args.fast)
     idmap = forward_masks(model, imgs, (Ho, Wo))                                # instance masks at original res
 
     mdir = os.path.join(args.out, "masks"); os.makedirs(mdir, exist_ok=True)
@@ -112,8 +118,8 @@ def main():
     vw = cv2.VideoWriter(os.path.join(args.out, name + "_overlay.mp4"),
                          cv2.VideoWriter_fourcc(*"mp4v"), ov_fps, (Wo, Ho))
     for f in range(S):
-        hard, over = refine_and_overlay(idmap[f], origs[f])                     # edge-snap + overlay
-        cv2.imwrite(os.path.join(mdir, f"frame_{f:04d}.png"), hard.astype(np.uint16))
+        _, over = refine_and_overlay(idmap[f], origs[f])                        # edge-snap for display only
+        cv2.imwrite(os.path.join(mdir, f"frame_{f:04d}.png"), idmap[f].astype(np.uint16))
         vw.write(cv2.cvtColor(over, cv2.COLOR_RGB2BGR))
     vw.release()
     print(f"[demo] wrote {name}_overlay.mp4 ({S}f {Wo}x{Ho}, {ov_fps:.1f}fps) + masks/ ({S} png)", flush=True)
