@@ -10,18 +10,21 @@ from segomega.models import SegOmega
 from segomega.engine import setup_trainable
 from segomega.engine.decode import edge_snap, masks_to_idmap, masks_to_idmap_owned, model_input_hw
 from segomega.engine.fast_inference import GraphRunner, optimize_for_inference, run as forward
+from segomega.engine.inference_memory import configure_inference_memory
 
 CKPT = os.environ.get("S4VY_CKPT", "/PATH/TO/checkpoints/S4VY/s4vy/segomega_final.pt")
 OUT_NAME = os.environ.get("DUMP_NAME", "segmenter")   # <name>.npz per clip
 
 
-def build(fast="full"):
+def build(fast="full", low_memory=False, offload_backbone=False):
     m = SegOmega(ckpt_path=os.environ.get("VGGT_OMEGA_CKPT"), num_queries=400, num_dec_layers=9, mask_dim=256,
                  dec_dim=256, supervise_depth=False, supervise_camera=False, use_teacher=False,
                  grad_checkpointing=True, load_pretrained=True, mask_feat_ratio=4)
     m = setup_trainable(m, mode="lora", lora_rank=256, lora_alpha=256.0)
     sd = torch.load(CKPT, map_location="cpu"); m.load_state_dict(sd.get("model", sd), strict=False)
     m = m.cuda().eval()
+    if low_memory or offload_backbone:
+        configure_inference_memory(m, offload_backbone=offload_backbone)
     if fast == "off":
         return m
     optimize_for_inference(m, exact=(fast == "exact"))
@@ -64,8 +67,10 @@ if __name__ == "__main__":
     ap.add_argument("--fast", default="full", choices=["off", "exact", "full"],
                     help="full (default): merged LoRA, BF16 weights, torch.compile, CUDA graphs; "
                          "exact: bitwise-identical speedups only; off: the plain eager forward")
+    ap.add_argument("--low-memory", action="store_true", help="discard unused inference auxiliaries and pyramid features")
+    ap.add_argument("--offload-backbone", action="store_true", help="also store cached features in CPU RAM; disables CUDA graph capture")
     args = ap.parse_args()
-    model = build(args.fast)
+    model = build(args.fast, args.low_memory, args.offload_backbone)
     for b in args.benches.split(","):
         cds = sorted(glob.glob(os.path.join(args.root, b, "clip_*")))
         _mc = int(os.environ.get("MAX_CLIPS", "0"))

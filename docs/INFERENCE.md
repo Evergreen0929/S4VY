@@ -148,6 +148,88 @@ still captures a graph (39 GiB peak). If a capture does not fit (for example 100
 only the graph's few-percent speedup is lost. On GPUs shared with other processes, leave
 headroom: 1024 at 100 frames needs nearly all of an 80 GB card.
 
+## Long clips and saved-mask comparisons
+
+Both inference entry points accept `--low-memory` to discard intermediate decoder
+predictions after their attention masks are built and release consumed pyramid features.
+All refinement layers still run; final logits and the decoder settings are unchanged.
+This is opt-in, and training/grad-enabled forwards retain auxiliary supervision.
+
+`--offload-backbone` also enables these reductions and stores cached backbone features
+in CPU RAM while the heads run, transferring each requested layer back to its original
+device. It reduces head-stage GPU residency, not the peak within the backbone, and adds
+transfer time and host-memory use (about 59.5 GB for four FP32 caches at 782 × 1024×576).
+It does not load or reuse features from disk. `GraphRunner` bypasses CUDA capture for
+this mode because the CPU transfers cannot be captured. The other `--fast` optimizations
+remain available. Configure memory options before creating a graph runner.
+
+```bash
+python demo/forward_video.py --video clip.mov --out outputs/clip \
+  --nframes 782 --long_side native --fast off --offload-backbone
+```
+
+This selects up to 782 frames uniformly; choose the actual frame count to retain every
+frame. Memory availability still limits clip size. No universal maximum follows from the
+225/226-frame concatenation boundary discussed below.
+
+Verify bitwise parity and record peak allocation on a short sample before a large run:
+
+```bash
+python tools/check_inference_memory.py --checkpoint /path/to/segmenter/s4vy.pt \
+  --frames /path/to/source/pngs --nframes 10 --long-side 1024 \
+  --out outputs/memory-parity.json
+```
+
+With the released checkpoint on ten sampled 1024×576 frames, both modes produced bitwise
+identical final logits, mask embeddings, and decoded instance IDs. Head tests also cover
+prompt outputs and training gradients. This check does not establish segmentation accuracy.
+
+Export a synchronized 2×2 comparison from existing predictions (FFmpeg required):
+
+```bash
+python tools/export_comparison.py --video clip.mov \
+  --offline outputs/offline/masks --stream outputs/stream/masks --sam outputs/sam/masks \
+  --offline-color 169=55,200,245 --offline-color 147=255,145,35 \
+  --sam-label 'SAM3: robot arm' --out outputs/comparison.mp4
+```
+
+Every mask directory must contain one PNG per source frame in the same temporal order.
+The exporter accepts uint16 IDs and legacy packed RGB IDs (`R + 256*G`), resizes IDs with
+nearest neighbors, copies available source audio through AAC encoding, and saves a JSON
+manifest beside the video. Existing output videos are not overwritten. Optional `--duration`
+sets the total constant-frame-rate video duration; otherwise source FPS is used. Variable
+source timestamps are not preserved. Color overrides affect only the offline display;
+saved masks and IDs are unchanged. IDs 169/147 are example queries from the grasping clip,
+not universal arm/object classes. Override panel labels to describe the actual saved runs.
+
+To inspect candidate merges, using an earlier run as a diagnostic reference:
+
+```bash
+python tools/audit_instance_ids.py --reference outputs/earlier/masks \
+  --candidate outputs/offline/masks --object-id 227 --arm-id 169 \
+  --out outputs/instance-id-audit.json
+```
+
+This compares majority IDs inside eroded reference interiors. Filenames must identify
+the same source frames; missing candidate frames are reported explicitly. The reference
+is not ground truth. Shared IDs are candidates for visual review, not an accuracy metric.
+Distinct IDs can receive nearly identical palette colors. Conversely, the corrected native
+grasping clip still has brief genuine object/arm merges at contact or occlusion; recoloring
+does not fix those predictions. Same-weight 512-resolution controls separated the object
+in some of these frames. Global mask agreement alone does not establish small-object quality.
+
+The concatenation microbenchmark is also available:
+
+```bash
+python tools/benchmark_cuda_cat.py --large --out outputs/cuda-cat-benchmark.json
+```
+
+`--large` includes the 226/256-frame cached-feature and 782-frame register-token layouts
+and needs about 24 GiB free GPU memory. Replay is checked against changed inputs and eager
+output. On the tested GB300, graph replay improved the 4.3–7.4 GB cases by about 0.2–0.4%,
+versus about 2–2.5× for a 19 MB case. These are resident concatenation timings, excluding model
+attention, CPU transfers, warmup and capture; they are not end-to-end model speedups.
+
 ## Notes
 
 - **Large CUDA concatenations:** backbone forwards automatically use explicit slice copies

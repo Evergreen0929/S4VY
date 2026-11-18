@@ -183,6 +183,10 @@ class GraphRunner:
     def __call__(self, images: torch.Tensor) -> dict:
         if images.dim() == 4:
             images = images.unsqueeze(0)
+        if getattr(getattr(self.model, "backbone", None), "offload_tokens", False):
+            # Blocking CPU feature transfers must stay outside CUDA capture.
+            self.graphs.clear()
+            return self._forward(images)
         key = (tuple(images.shape), images.dtype, images.device)
         if key in self.ungraphed:
             torch.cuda.empty_cache()               # these shapes sit near the memory limit

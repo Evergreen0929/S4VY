@@ -59,6 +59,7 @@ class MaskFeatureHead(nn.Module):
         self.uplift_guidance_ds = max(1, int(uplift_guidance_ds))
         self.uplift_compile = uplift_compile
         self.anyup_grad_ckpt = anyup_grad_ckpt
+        self.release_features = False
 
         self.norm = nn.LayerNorm(dim_in, eps=1e-5)
         self.projects = nn.ModuleList(
@@ -137,13 +138,18 @@ class MaskFeatureHead(nn.Module):
 
     def _scratch_forward(self, feats: list[torch.Tensor]) -> torch.Tensor:
         l1, l2, l3, l4 = feats
+        if self.release_features and not self.training and not torch.is_grad_enabled():
+            feats.clear()
         l1 = self.scratch.layer1_rn(l1)
         l2 = self.scratch.layer2_rn(l2)
         l3 = self.scratch.layer3_rn(l3)
         l4 = self.scratch.layer4_rn(l4)
         out = self.scratch.refinenet4(l4, size=l3.shape[2:])
+        del l4
         out = self.scratch.refinenet3(out, l3, size=l2.shape[2:])
+        del l3
         out = self.scratch.refinenet2(out, l2, size=l1.shape[2:])
+        del l2
         out = self.scratch.refinenet1(out, l1, size=l1.shape[2:])
         return out
 

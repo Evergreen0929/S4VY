@@ -23,6 +23,7 @@ from segomega.models import SegOmega
 from segomega.engine import setup_trainable
 from segomega.engine.decode import edge_snap, masks_to_idmap_owned, model_input_hw
 from segomega.engine.fast_inference import optimize_for_inference, run
+from segomega.engine.inference_memory import configure_inference_memory
 
 WEIGHTS_REPO = "jdzhang0929/S4VY"
 WEIGHTS = {"s4vy": "segmenter/s4vy.pt", "joint": "segmenter/s4vy_joint.pt"}
@@ -66,7 +67,7 @@ def load_frames(path, n, long_side=512):
     return torch.from_numpy(imgs).permute(0, 3, 1, 2), origs
 
 
-def build_model(which, fast="off"):
+def build_model(which, fast="off", low_memory=False, offload_backbone=False):
     w = hf_hub_download(WEIGHTS_REPO, WEIGHTS[which])          # bundles backbone + LoRA + decoder
     # s4vy_joint was trained jointly with the prompt branch, so its checkpoint carries a prompt
     # encoder; build it so every tensor in the checkpoint has a home.
@@ -80,6 +81,8 @@ def build_model(which, fast="off"):
     missing, unexpected = m.load_state_dict(sd.get("model", sd), strict=False)
     print(f"[demo] loaded {WEIGHTS[which]}  (missing={len(missing)} unexpected={len(unexpected)})", flush=True)
     m = m.cuda().eval()
+    if low_memory or offload_backbone:
+        configure_inference_memory(m, offload_backbone=offload_backbone)
     if fast != "off":   # one forward per video: no CUDA graph, its capture would not be reused
         print(f"[demo] fast inference: {optimize_for_inference(m, exact=(fast == 'exact'))}", flush=True)
     return m
@@ -102,6 +105,8 @@ def main():
                     help='model input long side, up to 1024, or "native" for the video\'s own size')
     ap.add_argument("--fast", default="off", choices=["off", "exact", "full"],
                     help="exact: bitwise-identical speedups; full: also merged LoRA, BF16 weights, torch.compile")
+    ap.add_argument("--low-memory", action="store_true", help="discard unused inference auxiliaries and pyramid features")
+    ap.add_argument("--offload-backbone", action="store_true", help="also store cached features in CPU RAM")
     args = ap.parse_args()
 
     imgs, origs = load_frames(args.video, args.nframes, args.long_side)
@@ -109,7 +114,7 @@ def main():
     name = os.path.splitext(os.path.basename(args.video))[0]
     print(f"[demo] {name}: {S} frames, orig={Wo}x{Ho}", flush=True)
 
-    model = build_model(args.model, args.fast)
+    model = build_model(args.model, args.fast, args.low_memory, args.offload_backbone)
     idmap = forward_masks(model, imgs, (Ho, Wo))                                # instance masks at original res
 
     mdir = os.path.join(args.out, "masks"); os.makedirs(mdir, exist_ok=True)
