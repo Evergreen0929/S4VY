@@ -150,6 +150,25 @@ headroom: 1024 at 100 frames needs nearly all of an 80 GB card.
 
 ## Notes
 
+- **Large CUDA concatenations:** backbone forwards automatically use explicit slice copies
+  for homogeneous CUDA `torch.cat` outputs of at least 4 GiB. NVIDIA PyTorch 25.10
+  (`2.9.0a0+145a3a7`) silently corrupted some such outputs in our reproducer. The guard is
+  scoped to the backbone call, covers the external VGGT-Ω checkout without editing it, and
+  retains native concatenation for smaller tensors. It preserves weights, attention context,
+  and decoding settings, and supports compiled blocks and CUDA graph capture.
+  At 1024×576, cached FP32 features have shape `[1, frames, 2321, 2048]`: 225 frames is
+  below 4 GiB, while 226 crosses it. A separate register-token concatenation also failed at
+  782 frames. These are implementation failure boundaries, not learned context limits.
+  Explicit copies restored coherent predictions on the tested 256- and 782-frame clips.
+  The 782-frame diagnostic used lossless CPU feature storage and discarded unused training
+  auxiliaries to fit approximately 200 GB of GPU allocation; this is not a memory guarantee
+  for the standard inference script. Frame limits still depend on resolution and memory.
+  Regenerate features cached by affected runs: correcting the operator cannot repair an
+  existing corrupted feature cache.
+- Run the concatenation checks with `python -m unittest discover -s tests -v`.
+  Set `S4VY_RUN_COMPILE_TESTS=1` for the Inductor test and
+  `S4VY_RUN_LARGE_CUDA_TESTS=1` for the actual 4-GiB boundary and 782-frame register-layout
+  regressions (24 GiB of free GPU memory recommended).
 - `--fast full` merges the LoRA adapters into the backbone weights in memory at load time; the
   checkpoint on disk is unchanged.
 - Results above use PyTorch 2.9. `fast_inference.py` also supports the pinned PyTorch 2.5.0,
