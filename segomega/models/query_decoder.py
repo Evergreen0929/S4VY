@@ -93,6 +93,7 @@ class QueryInstanceDecoder(nn.Module):
         self.num_heads = num_heads
         self.memory_layer_idx = memory_layer_idx
         self.mask_attn_threshold = mask_attn_threshold
+        self.return_aux_outputs = True
 
         self.query_feat = nn.Embedding(num_queries, dec_dim)
         self.query_pos = nn.Embedding(num_queries, dec_dim)
@@ -173,6 +174,7 @@ class QueryInstanceDecoder(nn.Module):
         assert Np == ph * pw, f"patch count {Np} != {ph}*{pw}"
 
         mem = self.mem_proj(patches)                               # (B,S,Np,dec)
+        del patches, mem_tokens
         # per-frame positional embedding added to memory (encodes frame-SEPARATION; MATTERS: S=16 WITH vs
         # WITHOUT -> mask IoU 0.10). SEG_FRAMEPOS_MODE ablation:
         #   embed (default) = learned nn.Embedding(64), cycle-padded for S>64 (segmenter original; frames capped/16-trained)
@@ -209,6 +211,7 @@ class QueryInstanceDecoder(nn.Module):
             q_pos = torch.cat([q_pos, prompt_q_pos], dim=1)
             sa_mask = self._build_sa_mask(B, N, P, prompt_valid, q.device)
 
+        keep_aux = self.return_aux_outputs or self.training or torch.is_grad_enabled()
         aux = []
         # initial prediction (layer 0 input) for the first mask-attention
         obj, mask_logits = self._predict(q, mask_feat)
@@ -216,6 +219,9 @@ class QueryInstanceDecoder(nn.Module):
 
         for layer in self.layers:
             attn_mask = self._attn_mask_from_logits(mask_logits, ph, pw)
+            if not keep_aux:
+                aux.clear()
+                del mask_logits
             q = layer(q, q_pos, mem, mem_pos, attn_mask, sa_mask=sa_mask)
             obj, mask_logits = self._predict(q, mask_feat)
             aux.append({"objectness": obj, "mask_logits": mask_logits})

@@ -19,6 +19,8 @@ import torch
 import torch.nn as nn
 
 from ..paths import VGGT_OMEGA_CKPT, ensure_vggt_omega_on_path
+from ..utils.cuda_cat import SafeCudaCat
+from ..utils.host_tokens import HostTokens
 
 ensure_vggt_omega_on_path()
 from vggt_omega.models.vggt_omega import VGGTOmega  # noqa: E402
@@ -47,6 +49,7 @@ class VGGTOmegaBackbone(nn.Module):
         self.embed_dim = embed_dim
         self.token_dim = 2 * embed_dim
         self.patch_token_start = PATCH_TOKEN_START
+        self.offload_tokens = False
 
         self.net = VGGTOmega(
             patch_size=patch_size,
@@ -90,8 +93,12 @@ class VGGTOmegaBackbone(nn.Module):
             images = images.unsqueeze(0)
         amp_dtype = torch.bfloat16 if (amp and torch.cuda.is_available() and torch.cuda.is_bf16_supported()) else torch.float16
         ctx = torch.autocast(device_type="cuda", dtype=amp_dtype) if (amp and torch.cuda.is_available()) else _nullctx()
-        with ctx:
+        # Scope the large-CUDA-cat workaround to the external backbone.
+        with ctx, SafeCudaCat():
             tokens_list, patch_token_start = self.net.aggregator(images)
+
+        if self.offload_tokens and not self.training and not torch.is_grad_enabled():
+            tokens_list = HostTokens(tokens_list)
 
         out = {"tokens_list": tokens_list, "patch_token_start": patch_token_start}
 

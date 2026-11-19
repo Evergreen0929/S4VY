@@ -97,8 +97,49 @@ python grounding/run_pipeline_scene.py --grounder <g> --critic <c> ...   # stati
 python grounding/run_pipeline_video.py --grounder <g> --critic <c> ...   # video
 ```
 
+To pick the decoder, input resolution and speed mode for your GPU, see
+[docs/INFERENCE.md](docs/INFERENCE.md): accuracy, speed and memory for each configuration.
+
 `demo/forward_video.py` and `demo/grounding_video.py` are self-contained: they pull the weights
 from Hugging Face and need only a video file.
+
+### Decoding
+
+`infer_segmenter.py` and `demo/forward_video.py` decode with `masks_to_idmap_owned`
+(`segomega/engine/decode.py`), the decoder of the S4VY streaming service. Each frame's mask
+logits are upsampled bilinearly. Queries with P(object) > 0.1 and P(mask) > 0.65 at a pixel
+compete for it; the highest P(object) × P(mask) wins. Pixels with no eligible query are
+background. Ids are query index + 1, so an id names the same query across frames within
+one model call. The saved masks replace the earlier area-ordered paint (P(object) > 0.3,
+mask > 0.5) followed by a CPU `edge_snap`, which `infer_segmenter.py --decoder legacy`
+still produces. The demo applies `edge_snap` only to its display overlay, not its saved PNG masks.
+
+### Fast inference
+
+`infer_segmenter.py` and `demo/forward_video.py` take `--fast {off,exact,full}`
+(`segomega/engine/fast_inference.py`). `infer_segmenter.py` defaults to `full`; the demo defaults to
+`off`.
+
+- `exact` replaces the decoder's mask-to-attention bilinear downsample with an equivalent strided
+  form and (in `infer_segmenter.py`) replays a CUDA graph per repeated clip shape. Outputs are bitwise
+  identical to `off`.
+- `full` additionally merges the LoRA adapters into the backbone weights (in memory; the checkpoint
+  is unchanged), caches BF16 backbone weights and `torch.compile`s the backbone blocks.
+  Floating-point order changes, so a small fraction of pixels change instance; benchmark scores
+  stay within noise.
+
+New clip shapes pay compilation in `full` (seconds to tens of seconds). `infer_segmenter.py` caches
+graphs for two shapes; each cache miss pays warm-up and capture again, including after eviction.
+A shape whose graph does not fit in GPU memory runs compiled without one. For a single video,
+`demo/forward_video.py` skips graph capture, so compilation rarely pays off there; use `--fast exact`.
+
+### Input resolution
+
+`infer_segmenter.py` feeds frames to the model at their own size (`--input-long-side native`, the
+default; long side capped at 1024 and the input at 1024×768 pixels). Pass `--input-long-side 512`
+for the smaller input it used before: up to half the time and 60% of the memory, but lower accuracy
+on every benchmark except the two ScanNet ones. `demo/forward_video.py --long_side` takes the same
+values and still defaults to 512, since videos are often larger than the exported benchmark frames.
 
 ## What is not included
 
