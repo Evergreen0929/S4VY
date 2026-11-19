@@ -111,8 +111,8 @@ def main():
     on_off = lambda v: {"on": True, "off": False}[v]
     ap.add_argument("--speedup", type=on_off, default=True, metavar="{on,off}",
                     help="on (default): exact mask downsample, BF16 weight cache, torch.compile (LoRA not merged); "
-                         "off: the paper's eager forward. Not part of the paper. Compiling costs tens of seconds "
-                         "once, so for one short video off can finish sooner")
+                         "off: the paper's eager forward. Not part of the paper. Compiling makes the first call "
+                         "seconds slower, so for one short video off can finish sooner")
     ap.add_argument("--mask-id-enhance", type=on_off, default=True, metavar="{on,off}",
                     help="on (default): owned decoding; off: the paper's decoder. Not part of the paper")
     ap.add_argument("--low-memory", action="store_true", help="discard unused inference auxiliaries and pyramid features")

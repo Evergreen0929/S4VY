@@ -1,43 +1,107 @@
 # Choosing an inference configuration
 
-`infer_segmenter.py` has three settings that trade accuracy, speed and GPU memory:
+`infer_segmenter.py` has these settings:
 
-| Flag | Values | Default |
-|---|---|---|
-| `--decoder` | `owned` (per-pixel score ownership), `legacy` (area-ordered paint + `edge_snap`) | `owned` |
-| `--input-long-side` | `16`–`1024`, or `native` (the frames' own size, long side capped at 1024, input at 1024×768 px) | `native` |
-| `--fast` | `off` (eager), `exact` (bitwise-identical speedups + CUDA graphs), `full` (+ merged LoRA, BF16 weights, `torch.compile`) | `full` |
+| Flag | Values | Default | In the paper |
+|---|---|---|---|
+| `--mask-id-enhance` | `on` (owned decoding, `masks_to_idmap_owned`), `off` (the paper's decoder, `masks_to_idmap_paper`) | `on` | **no** (the paper used `off`) |
+| `--speedup` | `on` (exact attention-mask downsample, BF16 weight cache, `torch.compile`; LoRA not merged), `off` (plain BF16-autocast forward) | `on` | **no** (the paper used `off`) |
+| `--cuda-graph` | with `--speedup on`, also replay a CUDA graph per repeated clip shape (exact; extra GPU memory, see [Memory](#memory)) | off | no |
+| `--input-long-side` | `native` (the frames as given; scaled down only past 1024 px long side or 1024×768 px), or `16`–`1024` | `native` | `native` |
+| `--low-memory`, `--offload-backbone` | opt-in memory reductions, outputs unchanged (see [Long clips](#long-clips-and-saved-mask-comparisons)) | off | off |
 
-`demo/forward_video.py` takes `--long_side` and `--fast` with the same values but defaults to
-`512` and `off`, since it runs a single forward per video.
+`demo/forward_video.py` takes `--mask-id-enhance`, `--speedup` and `--long_side` with the same
+values. `--long_side` defaults to `512` there, and the demo skips CUDA graphs since it runs a
+single forward per video.
 
-All numbers below are measured with the released `segmenter/s4vy.pt`.
+**`--mask-id-enhance` and `--speedup` are not part of the paper.** Every number in the paper was
+produced with both off. With both off and native input, `infer_segmenter.py` reproduces our
+evaluation of the released checkpoint for the paper bitwise (id maps and scores) on all 1,875
+benchmark clips; `segmenter/s4vy.pt` is that checkpoint, tensor for tensor.
 
 ## Quick pick
 
 | Situation | Flags | Expect |
 |---|---|---|
-| Benchmark sweeps, any GPU with ≥ 48 GB | *(defaults)* | 67.7 mean score, 0.2–4.2 s/clip |
-| Highest accuracy, ≥ 80 GB | `--input-long-side 1024` | 68.5 mean score, ~3× slower than native |
-| Smaller GPU (≥ 32 GB), or fastest | `--input-long-side 512` | 63.8 mean score, 0.2–2.0 s/clip |
-| Outputs bitwise identical to the eager model | `--fast exact` | same accuracy as `off`, 1.1–1.4× faster than `off` |
-| The released behaviour before these options existed | `--decoder legacy --input-long-side 512 --fast off` | 60.5 mean score, 1.6–12.8 s/clip |
-| One video, interactive | `demo/forward_video.py --fast exact` | no compilation wait |
-
-Mean score = mean of the 16 cohort metrics in the accuracy table below. Times are warm
-end-to-end seconds per clip on an NVIDIA GB300 for 8–100-frame clips; memory is for
-100-frame clips (see [Memory](#memory)).
+| Reproduce our paper evaluation of this checkpoint | `--speedup off --mask-id-enhance off` | bitwise identical id maps and scores |
+| Benchmark sweeps, any GPU with ≥ 48 GB | *(defaults)* | 67.7 mean score (both off: 62.2); warm forward 0.2–7.3 s/clip on an A100 |
+| Highest accuracy, ≥ 80 GB | `--input-long-side 1024` | +0.8 mean score over native, ~3× slower |
+| Smaller GPU (≥ 32 GB), or fastest | `--input-long-side 512` | −3.9 mean score vs native, about half the time |
+| One short video | `demo/forward_video.py --speedup off` | no compilation wait |
 
 ## Accuracy
 
 Evaluation setup:
 
-- **Clips:** every prompt-free cohort of paper Tables 2–5 (1,374 clips; the paper's exported
-  frames and ground truth).
-- **Scoring:** the paper's protocol (greedy whole-track matching, J&F, strict 4D IoU on DAVIS and
-  LVOS, VIPSeg clip-mean STQ and pooled mAP).
+- **Clips:** every prompt-free cohort of the paper's segmentation tables (the paper's exported
+  frames and ground truth): IGGT-Bench ScanNet (Table 1) and its IGGT-protocol arms (Table 1b),
+  ScanNet200 (Table 1c), DAVIS/LVOS dense, sparse, shuffled and hard (Table 2), windowed full-frame
+  LVOS (Table 2b), VIPSeg (Table 3), strict 4D (Table 4), HOI4D, EPIC-KITCHENS VISOR and KITTI-STEP.
+- **Scoring:** the paper's protocol and scorers (greedy whole-track matching, J&F, T-mIoU/T-SR,
+  strict 4D IoU, VIPSeg clip-mean STQ and pooled thing mAP).
+- One NVIDIA A100-SXM4-80GB, PyTorch 2.5.0, released weights, native input.
 
-### By input resolution (`--decoder owned --fast full`)
+### By switch
+
+"Both off" is our evaluation of the released checkpoint for the paper, re-scored; with both switches
+off the code reproduces it bitwise. Values are ×100.
+
+| Benchmark | Metric | Both off | `--mask-id-enhance on` | `--speedup on` | **Default (both on)** |
+|---|---|---:|---:|---:|---:|
+| ScanNet, IGGT-Bench (Tab. 1) | J&F | 78.1 | **79.7** | 78.1 | **79.7** |
+| ScanNet, IGGT-Bench (Tab. 1) | T-mIoU | 80.3 | **82.1** | 80.2 | **82.1** |
+| ScanNet, IGGT-Bench (Tab. 1) | T-SR | 79.2 | **80.8** | 77.9 | **80.8** |
+| ScanNet, IGGT protocol (Tab. 1b) | T-mIoU | 79.9 | **82.8** | 79.7 | 82.7 |
+| ScanNet, IGGT protocol (Tab. 1b) | T-SR | **97.0** | 95.5 | **97.0** | 95.5 |
+| ScanNet++, IGGT protocol (Tab. 1b) | T-mIoU | 78.0 | **80.3** | 77.8 | 80.2 |
+| ScanNet++, IGGT protocol (Tab. 1b) | T-SR | 100.0 | 100.0 | 100.0 | 100.0 |
+| ScanNet200 val (Tab. 1c) | J&F | 43.6 | **46.2** | 43.4 | **46.2** |
+| ScanNet200 val (Tab. 1c) | T-mIoU | 49.2 | **52.8** | 49.0 | **52.8** |
+| DAVIS 2017 (Tab. 2) | J&F | 80.3 | **84.0** | 80.3 | **84.0** |
+| DAVIS sparse | J&F | 80.7 | 83.7 | 79.8 | **83.8** |
+| DAVIS shuffled | J&F | 80.0 | **83.9** | 79.9 | **83.9** |
+| LVOS (Tab. 2) | J&F | 60.2 | **67.9** | 58.7 | 67.8 |
+| LVOS sparse | J&F | 64.5 | **73.6** | 65.0 | 73.3 |
+| LVOS shuffled | J&F | 65.6 | 73.1 | 65.8 | **73.2** |
+| LVOS hard | J&F | 58.8 | 67.5 | 59.0 | **67.6** |
+| LVOS full-frame, 64-frame windows (Tab. 2b) | J&F | 54.7 | **61.5** | 54.9 | **61.5** |
+| LVOS full-frame, 128-frame windows (Tab. 2b) | J&F | 53.1 | **59.9** | 53.2 | **59.9** |
+| VIPSeg (Tab. 3) | STQ | 79.5 | **82.4** | 79.5 | **82.4** |
+| VIPSeg (Tab. 3) | AQ | 65.4 | **70.4** | 65.4 | **70.4** |
+| VIPSeg (Tab. 3) | SQ | **98.0** | 97.4 | **98.0** | 97.4 |
+| VIPSeg (Tab. 3) | thing mAP | 35.2 | 44.5 | 35.2 | **44.6** |
+| VIPSeg sparse | STQ | 79.6 | **82.4** | 79.6 | **82.4** |
+| VIPSeg sparse | thing mAP | 38.5 | 48.6 | 38.6 | **48.7** |
+| DAVIS 2017, strict 4D (Tab. 4) | IoU4D | 71.5 | **79.1** | 71.5 | **79.1** |
+| DAVIS 2017, strict 4D (Tab. 4) | SR4D | 91.4 | **95.3** | 91.4 | **95.3** |
+| LVOS, strict 4D (Tab. 4) | IoU4D | 53.3 | **63.3** | 52.1 | 63.2 |
+| LVOS, strict 4D (Tab. 4) | SR4D | 57.3 | **75.3** | 54.3 | **75.3** |
+| HOI4D | J&F | 62.4 | **66.5** | 62.4 | 66.4 |
+| EPIC-KITCHENS VISOR | J&F | 31.3 | 35.6 | 31.3 | **35.8** |
+| KITTI-STEP | J&F | 50.1 | **52.2** | 49.6 | 51.9 |
+
+`--mask-id-enhance` raises every row except VIPSeg SQ (−0.6) and the IGGT-protocol ScanNet T-SR
+(−1.5); the IGGT-protocol ScanNet++ T-SR is 100 either way. Most of the gain is on long videos and
+crowded scenes (LVOS, VISOR, VIPSeg mAP), where large masks used to paint over smaller objects.
+Metrics that charge false positives rise too (VIPSeg thing mAP, STQ's association term AQ), so the
+gain is not bought with extra predictions. At the decoder's default P(object) > 0.1 it predicts
+15–35% more instances than the paper's decoder; at P(object) > 0.3 the count matches the paper's
+and no score moves by more than 1.0 (KITTI-STEP, −1.0), so the gain comes from the ownership rule,
+not the threshold.
+
+`--speedup` changes scores only through `torch.compile`'s floating-point order. With the owned
+decoder, the median clip keeps 99.82% of its pixels' instance (5th percentile 93.2%, over 1,875
+clips), and the 31 scores above move by 0.06 on average (largest 0.3, KITTI-STEP J&F). With the
+paper's decoder they move by 0.35 on average; the largest change is −3.0 on LVOS strict-4D SR4D
+(−1.5 on LVOS J&F).
+
+
+### By input resolution
+
+This sweep was measured by the S4VY streaming-service team with the owned decoder and an earlier
+speedup build that also merged the LoRA adapters (NVIDIA GB300, PyTorch 2.9). "Paper" is the value
+printed in the paper. Its native column agrees with the default column of the switch table above to
+within 0.3 on every shared row.
 
 | Cohort | Metric | Paper | 512 | native | 1024 |
 |---|---|---:|---:|---:|---:|
@@ -71,82 +135,55 @@ Against 512, native is significantly better on 14 of the 16 rows (paired bootstr
 loses 0.2 on ScanNet200 and is within noise on ScanNet (IGGT). 1024 adds more on DAVIS, LVOS and
 VISOR but loses 1.5 on ScanNet200 against 512.
 
-### By decoder (mean of the 16 rows, `--fast full`)
-
-| Decoder | 512 | native | 1024 |
-|---|---:|---:|---:|
-| `legacy` (area paint + `edge_snap`) | 60.35 | 63.50 | 63.63 |
-| `legacy` without `edge_snap` | 59.77 | 63.48 | 64.90 |
-| **`owned`** | **63.80** | **67.70** | **68.50** |
-| `owned` + `edge_snap` | 63.86 | 66.83 | 66.61 |
-
-`edge_snap` adds nothing on top of `owned` and costs ~95 ms per frame on the CPU.
-
-### By fast mode
-
-`--fast exact` is bitwise identical to `--fast off`. `--fast full` changes floating-point order,
-so 99.4–99.99% of pixels keep their instance. Over the full 1,374-clip evaluation at 512 with
-the `owned` decoder, the paired `full` − `off` change per cohort metric ranges from −0.81 (LVOS
-hard / shuffled) to +0.32 (LVOS sparse), and every paired 95% CI includes zero. Individual clips
-do move slightly in both directions.
-
 ## Speed
 
-### End-to-end seconds per clip (paper Table 11 format)
+Per clip on one NVIDIA A100-SXM4-80GB (PyTorch 2.5.0), native input, all 1,875 benchmark clips,
+without CUDA graphs. "Forward" is the model forward alone; "warm" excludes the first clip of each new
+shape, which pays compilation under `--speedup on`.
 
-PNG decode + resize + forward + decode to a full-resolution id map, on an even sample of the
-Table 11 cohorts (10 ScanNet, 30 VIPSeg, 30 DAVIS, 20 LVOS, 20 HOI4D clips). Warm = the second run of the same clip. One NVIDIA GB300, PyTorch 2.9.
+| Clips | Frames (mean) | Forward, `--speedup off` | Forward, `--speedup on` (warm) | Speedup | Decode, paper | Decode, owned |
+|---|---:|---:|---:|---:|---:|---:|
+| ScanNet, IGGT-Bench | 8 | 0.43 s | 0.24 s | 1.82× | 0.12 s | 0.025 s |
+| ScanNet200 | 8 | 0.40 s | 0.25 s | 1.61× | 0.08 s | 0.007 s |
+| DAVIS | 66 | 4.94 s | 4.03 s | 1.23× | 0.31 s | 0.033 s |
+| LVOS | 100 | 8.64 s | 7.16 s | 1.21× | 0.56 s | 0.052 s |
+| HOI4D | 100 | 8.73 s | 7.17 s | 1.22× | 0.29 s | 0.037 s |
+| VISOR | 85 | 7.11 s | 6.97 s | 1.02× | 1.12 s | 0.082 s |
+| KITTI-STEP | 100 | 8.86 s | 7.27 s | 1.22× | 1.17 s | 0.096 s |
+| VIPSeg | 24 | 1.33 s | 0.94 s | 1.42× | 0.09 s | 0.011 s |
+| 16-frame sparse / shuffled sets | 16 | 0.80 s | 0.53 s | 1.52× | 0.06 s | 0.008 s |
 
-| Configuration | ScanNet (8 f) | VIPSeg (21 f) | DAVIS (66 f) | LVOS (100 f) | HOI4D (100 f) |
-|---|---:|---:|---:|---:|---:|
-| Paper, A100 | 0.5 | 3.0 | 6.6 | 10.1 | 10.2 |
-| `legacy`, 512, `off` (the earlier release) | 1.63 | 3.13 | 8.89 | 12.77 | 11.79 |
-| `owned`, 512, `off` | 0.30 | 0.53 | 1.70 | 2.64 | 2.71 |
-| `owned`, 512, `exact` | 0.21 | 0.45 | 1.50 | 2.34 | 2.40 |
-| `owned`, 512, `full` | 0.17 | 0.37 | 1.24 | 1.95 | 2.02 |
-| **`owned`, native, `full` (default)** | **0.19** | **0.57** | **2.48** | **4.10** | **4.17** |
-| `owned`, 1024, `full` | 0.57 | 1.51 | 7.33 | 13.31 | 13.39 |
+**First call per clip shape.** `--speedup on` compiles every new (frames, height, width) shape, so that
+first call is slower (4–18 s for 10–90% of first calls here, forward included); later clips of the same shape reuse the
+compiled kernels, so sweeps over clips of one size get the warm numbers above. A set of clips with
+all-different shapes pays the first-call cost each time and is better served by `--speedup off`.
 
-Frame counts are this sample's means; the paper's VIPSeg clips average 41 frames and its DAVIS clips 71.
-
-**First call per clip shape.** `full` compiles every new (frames, height, width) shape, and `exact` and `full` both
-capture a CUDA graph for it. That first call takes seconds to tens of seconds (~35 s for a short
-clip on a cold compile cache, ~50 s for 100 frames × batch 4). Later clips of the same shape
-replay the graph. `infer_segmenter.py` keeps graphs for the last two shapes, so sweeps over
-clips of one size get the warm numbers above; a set of clips with all-different shapes pays the
-first-call cost each time and is better served by `--fast off` or `exact`.
-
-### Forward throughput at 688×384 (paper Table 12 format)
-
-Frames per second for the model forward alone, at the paper's GB200 batch sizes (in parentheses).
-
-| Frames per clip | Paper A100 | Paper GB200 | GB300 `off` | GB300 `exact` | GB300 `full` |
-|---:|---:|---:|---:|---:|---:|
-| 1 | 25.85 (32) | 63.15 (32) | 38.09 (32) | 44.57 (32) | 65.88 (32) |
-| 4 | 25.44 (32) | 65.19 (32) | 39.02 (32) | 45.70 (32) | 67.30 (32) |
-| 8 | 24.37 (16) | 64.40 (32) | 38.15 (32) | 44.50 (32) | 64.56 (32) |
-| 16 | 22.28 (8) | 61.61 (16) | 35.86 (16) | 41.33 (16) | 58.08 (16) |
-| 32 | 18.98 (4) | 56.69 (8) | 32.04 (8) | 36.21 (8) | 48.48 (8) |
-| 64 | 14.72 (2) | 48.64 (4) | 26.32 (4) | 28.51 (4) | 35.59 (4) |
-| 100 | 11.64 (1) | 42.11 (4) | 22.02 (4) | 25.50 (4) | 30.96 (4) |
+**CUDA graphs** (`--cuda-graph`, off by default) replay a captured graph per clip shape, keeping the
+last two shapes. They are exact (on 887 clips every instance count and per-clip pixel agreement matched the run
+without graphs) and
+make the warm forward 1–5% faster on the cohorts we measured (ScanNet200 +5%, DAVIS sparse +2%, LVOS sparse +1%, VIPSeg sparse +1%, HOI4D +2%, LVOS +2%). Each capture costs a few extra forwards the
+first time a shape is seen, and each cached graph keeps its own GPU memory (see [Memory](#memory)).
 
 ## Memory
 
 Peak allocated GiB for one 100-frame 688×384 clip:
 
-| Input long side | Model input | `off` | `full`, no CUDA graph |
-|---|---|---:|---:|
-| 512 | 512×272 | 22.2 | 22.1 |
-| native | 688×384 | 37.0 | 36.9 |
-| 1024 | 1024×560 | 73.7 | 73.6 |
+| Input long side | Model input | `--speedup off` |
+|---|---|---:|
+| 512 | 512×272 | 22.2 |
+| native | 688×384 | 37.0 |
+| 1024 | 1024×560 | 73.7 |
 
-Memory grows with frames × pixels, so shorter clips need proportionally less.
+Memory grows with frames × pixels, so shorter clips need proportionally less. `--speedup on` adds
+the BF16 copies of the aggregator weights (1.8 GB).
 
-**CUDA graphs** add memory for their own buffers. Under an 80 GB cap, a 100-frame native clip
-still captures a graph (39 GiB peak). If a capture does not fit (for example 100 frames at
-1024), `GraphRunner` runs that shape compiled without a graph; the output is identical and
-only the graph's few-percent speedup is lost. On GPUs shared with other processes, leave
-headroom: 1024 at 100 frames needs nearly all of an 80 GB card.
+**CUDA graphs** (`--cuda-graph`) add memory for their own buffers, which is why they are off by
+default. Under an 80 GB cap, a 100-frame native clip still captures a graph (39 GiB peak), but each
+of the two cached graphs keeps its memory between clips: on 40–90-frame DAVIS clips they held about
+30 GB of an 80 GB A100 together. If a capture does not fit (for example 100 frames at 1024),
+`GraphRunner` runs that shape compiled without a graph; the output is identical and only the
+graph's gain is lost. On GPUs shared with other processes, leave headroom: 1024 at 100 frames
+needs nearly all of an 80 GB card.
 
 ## Long clips and saved-mask comparisons
 
@@ -160,12 +197,12 @@ in CPU RAM while the heads run, transferring each requested layer back to its or
 device. It reduces head-stage GPU residency, not the peak within the backbone, and adds
 transfer time and host-memory use (about 59.5 GB for four FP32 caches at 782 × 1024×576).
 It does not load or reuse features from disk. `GraphRunner` bypasses CUDA capture for
-this mode because the CPU transfers cannot be captured. The other `--fast` optimizations
+this mode because the CPU transfers cannot be captured. The other `--speedup` optimizations
 remain available. Configure memory options before creating a graph runner.
 
 ```bash
 python demo/forward_video.py --video clip.mov --out outputs/clip \
-  --nframes 782 --long_side native --fast off --offload-backbone
+  --nframes 782 --long_side native --speedup off --offload-backbone
 ```
 
 This selects up to 782 frames uniformly; choose the actual frame count to retain every
@@ -251,9 +288,13 @@ attention, CPU transfers, warmup and capture; they are not end-to-end model spee
   Set `S4VY_RUN_COMPILE_TESTS=1` for the Inductor test and
   `S4VY_RUN_LARGE_CUDA_TESTS=1` for the actual 4-GiB boundary and 782-frame register-layout
   regressions (24 GiB of free GPU memory recommended).
-- `--fast full` merges the LoRA adapters into the backbone weights in memory at load time; the
-  checkpoint on disk is unchanged.
-- Results above use PyTorch 2.9. `fast_inference.py` also supports the pinned PyTorch 2.5.0,
-  but timings there have not been measured.
-- The GB300 was shared with other resident processes during the measurements; expect some
-  run-to-run variation.
+- `--speedup` never merges the LoRA adapters into the backbone weights and does not cast them, so
+  `set_lora_enabled(False)` still yields the original VGGT-Ω backbone (the geometry path). The BF16
+  weight cache covers only the aggregator; the FP32 geometry heads are untouched. CUDA graphs are keyed
+  on the LoRA state, so toggling LoRA never replays a graph captured in the other state.
+- `torch.compile` runs with Inductor's pattern-rewrite passes off: on PyTorch 2.5 its int8
+  weight-only quantization pattern misreads the unmerged LoRA's scalar multiply and fails to compile.
+- The switch, speed and accuracy tables use the pinned PyTorch 2.5.0; the input-resolution sweep and
+  the memory table use PyTorch 2.9.
+- The GB300 used for the input-resolution sweep and the memory table was shared with other resident
+  processes; expect some run-to-run variation.

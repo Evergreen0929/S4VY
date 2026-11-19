@@ -35,8 +35,8 @@ def build(speedup=True, cuda_graph=False, low_memory=False, offload_backbone=Fal
         configure_inference_memory(m, offload_backbone=offload_backbone)
     if speedup:
         enable_speedup(m)
-    # CUDA graphs: opt-in. Each cached graph keeps its own memory pool (two 100-frame native graphs held
-    # ~30 GB and ran an 80 GB A100 out of memory), for a few percent of speed on repeated clip shapes.
+    # CUDA graphs: opt-in. Each cached graph keeps its own memory pool between clips (on 40-90-frame DAVIS
+    # clips the two cached graphs held ~30 GB of an 80 GB A100), for a little speed on repeated clip shapes.
     return GraphRunner(m, capacity=2) if (speedup and cuda_graph) else m
 
 
