@@ -100,87 +100,11 @@ python grounding/run_pipeline_video.py --grounder <g> --critic <c> ...   # video
 `demo/forward_video.py` and `demo/grounding_video.py` are self-contained: they pull the weights
 from Hugging Face and need only a video file.
 
-### Two inference options that are not in the paper
-
-`infer_segmenter.py` and `demo/forward_video.py` have two switches that were added after the paper.
-**Neither is described in the paper, and no number in the paper uses either of them.** Both are on by
-default, and they are independent of each other:
-
-| Switch | `on` (default) | `off` (what the paper used) |
-|---|---|---|
-| `--mask-id-enhance` | Owned id-map decoding: each pixel goes to the most confident query | The paper's decoder: masks painted in order of area |
-| `--speedup` | Faster forward: exact attention-mask downsample, cached BF16 weights, `torch.compile` | Plain BF16-autocast forward |
-
-To reproduce the paper's segmentation outputs, turn both off:
-
-```bash
-S4VY_CKPT=<segmenter.pt> python infer_segmenter.py --root <clips> --speedup off --mask-id-enhance off
-```
-
-With both off and the default `--input-long-side native`, the id maps and scores are bitwise
-identical to our evaluation of this checkpoint for the paper; we checked this on all 1,875
-benchmark clips. The released `segmenter/s4vy.pt` is that checkpoint, tensor for tensor.
-
-**`--mask-id-enhance`** (`masks_to_idmap_owned` vs `masks_to_idmap_paper` in
-`segomega/engine/decode.py`) changes only how the 400 query masks become one id map. The paper's
-decoder keeps queries with P(object) > 0.3, binarizes each mask at 0.5 at the model's 1/4 mask
-resolution, upsamples it nearest-neighbour and paints the masks smallest first, so where two masks
-overlap the larger one wins. The owned decoder upsamples each frame's mask logits bilinearly, and every
-pixel goes to the query with the highest P(object) × P(mask) among queries with P(object) > 0.1 and
-P(mask) > 0.65; pixels with no such query are background. Overlaps are therefore settled by
-confidence instead of by area, so a small object in front of a larger mask is no longer painted
-over. Ids are query index + 1, so an id names the same query in every frame of one model call. The
-gain comes from the ownership rule, not the lower P(object) threshold: at P(object) > 0.3 it
-predicts only 2–10% more instances than the paper's decoder (15–45% more at 0.1) and no score in
-the table below moves by more than 1.0.
-
-**`--speedup`** (`segomega/engine/fast_inference.py`) leaves the model's weights and the LoRA
-adapters as they are. LoRA is not merged into the backbone, so `set_lora_enabled(False)` still
-gives the original VGGT-Ω backbone for geometry. The attention-mask downsample and the BF16 weight
-cache are exact. `torch.compile` changes floating-point order, so a small share of pixels can change
-instance (scores below). Every new clip shape is compiled on its first call, which makes that call
-slower (4–18 s on our benchmarks, forward included), so for a single short video `--speedup off`
-can finish sooner. CUDA graphs are a separate opt-in, `infer_segmenter.py --cuda-graph`: they are
-exact and make the warm forward 1–5% faster, but each cached graph keeps its own GPU memory (on 40–90-frame DAVIS clips the two cached graphs held about 30 GB of an
-80 GB A100).
-
-Effect on the paper's benchmarks (same weights, native input; full tables in
-[docs/INFERENCE.md](docs/INFERENCE.md)):
-
-| Benchmark | Metric | Both off (paper setting) | `--mask-id-enhance on` | Default (both on) |
-|---|---|---:|---:|---:|
-| ScanNet, IGGT-Bench (Tab. 1) | J&F | 78.1 | **79.7** | **79.7** |
-| ScanNet, IGGT protocol (Tab. 1b) | T-SR | **97.0** | 95.5 | 95.5 |
-| ScanNet200 val (Tab. 1c) | J&F | 43.6 | **46.2** | **46.2** |
-| DAVIS 2017 (Tab. 2) | J&F | 80.3 | **84.0** | **84.0** |
-| LVOS (Tab. 2) | J&F | 60.2 | **67.9** | 67.8 |
-| LVOS hard | J&F | 58.8 | 67.5 | **67.6** |
-| LVOS full-frame, 64-frame windows (Tab. 2b) | J&F | 54.7 | **61.5** | **61.5** |
-| VIPSeg (Tab. 3) | STQ | 79.5 | **82.4** | **82.4** |
-| VIPSeg (Tab. 3) | SQ | **98.0** | 97.4 | 97.4 |
-| VIPSeg (Tab. 3) | thing mAP | 35.2 | 44.5 | **44.6** |
-| DAVIS 2017, strict 4D (Tab. 4) | IoU4D | 71.5 | **79.1** | **79.1** |
-| LVOS, strict 4D (Tab. 4) | IoU4D | 53.3 | **63.3** | 63.2 |
-| HOI4D | J&F | 62.4 | **66.5** | 66.4 |
-| EPIC-KITCHENS VISOR | J&F | 31.3 | 35.6 | **35.8** |
-| KITTI-STEP | J&F | 50.1 | **52.2** | 51.9 |
-
-### Input resolution
-
-`infer_segmenter.py` feeds the frames to the model as they are (`--input-long-side native`, the
-default, as in the paper); frames longer than 1024 px or larger than 1024×768 are scaled down.
-Pass `--input-long-side 512` for a smaller input: up to half the time and 60% of the memory, but
-lower accuracy on every benchmark except the two ScanNet ones. `demo/forward_video.py --long_side`
-takes the same values and defaults to 512, since videos are often larger than the exported
-benchmark frames. [docs/INFERENCE.md](docs/INFERENCE.md) has accuracy, speed and memory for each
-setting.
-
-## What is not included
-
-The benchmark evaluation harness is not part of this release — the AP / IoU scoring, the
-benchmark protocols and the baseline adapters are omitted. Training and inference do not
-depend on it; the periodic validation hook in the training loop is a soft import and is
-skipped when it is absent. See `docs/CODE_STRUCTURE.md`.
+**Not in the paper.** `infer_segmenter.py` and `demo/forward_video.py` have two switches added
+after the paper, both on by default: `--mask-id-enhance` (each pixel goes to the most confident
+query instead of the paper's area-ordered mask painting) and `--speedup` (`torch.compile` and
+cached BF16 weights; the LoRA adapters are not merged). To reproduce the paper's outputs exactly,
+pass `--speedup off --mask-id-enhance off`. See [docs/INFERENCE.md](docs/INFERENCE.md).
 
 ## Data
 
