@@ -3,6 +3,10 @@
 Queries are already shared across frames -- one query is one 3D-consistent instance -- so decoding is
 just a per-query objectness threshold plus a mask threshold, and the result is a 4D masklet.
 
+Two id-map decoders, selected by `decode_idmap(..., mask_id_enhance=...)`:
+  masks_to_idmap_paper  the paper's decoder; every number in the paper uses it
+  masks_to_idmap_owned  mask ID enhancement (default), added after the paper
+
 The benchmark evaluation harness that produces the paper's numbers is not part of this release.
 """
 from __future__ import annotations
@@ -61,11 +65,15 @@ MAX_INPUT_PIXELS = 1024 * 768
 def model_input_hw(h, w, long_side=512, mult=16):
     """Input size the backbone expects: longest side capped, both sides floored to `mult`.
 
-    long_side is an integer up to MAX_INPUT_LONG_SIDE, or "native" to keep the frame's own size
-    (never enlarged, capped at MAX_INPUT_LONG_SIDE). Either way the input is held to
-    MAX_INPUT_PIXELS, so memory stays bounded whatever the aspect ratio.
+    long_side is an integer up to MAX_INPUT_LONG_SIDE, or "native" to keep the frame's own size.
+    "native" returns (h, w) unchanged when the frame is within MAX_INPUT_LONG_SIDE and
+    MAX_INPUT_PIXELS -- the frames exactly as given, which is what the paper's evaluation fed the
+    model -- and otherwise caps and floors like an integer long side. Either way the input is held
+    to MAX_INPUT_PIXELS, so memory stays bounded whatever the aspect ratio.
     """
     if long_side == "native":
+        if max(h, w) <= MAX_INPUT_LONG_SIDE and h * w <= MAX_INPUT_PIXELS:
+            return h, w
         long_side = min(max(h, w), MAX_INPUT_LONG_SIDE)
     if not isinstance(long_side, int) or not mult <= long_side <= MAX_INPUT_LONG_SIDE:
         raise ValueError(f'long_side must be an integer in {mult}..{MAX_INPUT_LONG_SIDE} or "native"')
@@ -101,16 +109,38 @@ def masks_to_idmap(objectness, mask_logits, out_hw, score_thr=0.5, mask_thr=0.5,
     return idmap, scores.float().cpu().numpy()[order]
 
 
+def masks_to_idmap_paper(objectness, mask_logits, out_hw, score_thr=0.3, mask_thr=0.5):
+    """The paper's decoder: every number in the paper was produced with it (`--mask-id-enhance off`).
+
+    Queries with P(object) > score_thr keep their binary mask (P(mask) > mask_thr, at least 10 pixels
+    at the model's mask resolution). The binary masks are upsampled nearest-neighbour and painted
+    smallest first, so where masks overlap the larger one wins. Ids are 1..n in that order and
+    scores[id - 1] is the query's P(object).
+    """
+    Ho, Wo = out_hw
+    S = mask_logits.shape[2]
+    scores, masks = decode_instances(objectness, mask_logits, score_thr=score_thr, mask_thr=mask_thr)[0]
+    if masks.numel() == 0:
+        return np.zeros((S, Ho, Wo), np.int32), np.zeros((0,), np.float32)
+    up = F.interpolate(masks.float().reshape(-1, 1, *masks.shape[-2:]), size=(Ho, Wo),
+                       mode="nearest").reshape(masks.shape[0], S, Ho, Wo).bool().cpu().numpy()
+    sc = scores.float().cpu().numpy()
+    order = np.argsort([m.sum() for m in up])                    # small first -> larger overwrites
+    idmap = np.zeros((S, Ho, Wo), np.int32)
+    for newid, qi in enumerate(order, start=1):
+        idmap[up[qi]] = newid
+    return idmap, sc[order]
+
+
 def masks_to_idmap_owned(objectness, mask_logits, out_hw, score_thr=0.1, mask_thr=0.65):
     """Decode one batch element to a full-resolution id map by per-pixel ownership (0 = background).
 
-    The decoder of the S4VY streaming service. Each frame's mask logits are upsampled bilinearly and
-    every pixel goes to the query with the highest P(object) * P(mask) among those above both
-    thresholds. Ids are query index + 1, so an id names the same query in every frame, and
-    scores[id - 1] is that query's P(object) (0 for queries that never pass mask_thr).
-
-    Against masks_to_idmap(score_thr=0.3) + edge_snap it scores higher on every paper benchmark
-    (+1.4 VIPSeg STQ, +3.2 ScanNet200 J&F, +7.2 LVOS J&F) and runs on the GPU in a few ms per frame.
+    Mask ID enhancement (`--mask-id-enhance on`, the default); NOT part of the paper. Each frame's mask
+    logits are upsampled bilinearly and every pixel goes to the query with the highest
+    P(object) * P(mask) among those above both thresholds, so overlaps are settled by confidence
+    instead of by mask area. Ids are query index + 1, so an id names the same query in every frame,
+    and scores[id - 1] is that query's P(object) (0 for queries that never pass mask_thr).
+    Runs on the GPU in a few ms per frame. See docs/INFERENCE.md for its effect on every benchmark.
     """
     Ho, Wo = out_hw
     scores = objectness[0].float().softmax(-1)[:, 0]
@@ -127,6 +157,12 @@ def masks_to_idmap_owned(objectness, mask_logits, out_hw, score_thr=0.1, mask_th
             idmap[f] = torch.where(torch.isfinite(best), keep[index] + 1, 0)
     eligible = (scores > score_thr) & (logits.sigmoid() > mask_thr).flatten(1).any(1)
     return idmap.cpu().numpy(), torch.where(eligible, scores, 0).cpu().numpy()
+
+
+def decode_idmap(preds, out_hw, mask_id_enhance=True):
+    """The decoder switch used by the entry points: owned decoding (on) or the paper's (off)."""
+    fn = masks_to_idmap_owned if mask_id_enhance else masks_to_idmap_paper
+    return fn(preds["objectness"], preds["mask_logits"], out_hw)
 
 
 def _guided(I, p, r=4, eps=1e-3):

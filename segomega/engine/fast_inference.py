@@ -1,26 +1,29 @@
-"""Inference-only speedups for the offline segmenter, ported from the S4VY streaming service.
+"""Inference speedup (`--speedup on`, the default). NOT part of the paper: the paper's numbers and
+timings use the plain eager forward (`--speedup off`).
 
-    report = optimize_for_inference(model)         # after load_state_dict(...), .cuda().eval()
+    report = enable_speedup(model)                 # after load_state_dict(...), .cuda().eval()
     runner = GraphRunner(model)                    # optional: CUDA graph per input shape
     preds = runner(images)                         # (1,S,3,H,W) in [0,1]; same keys as model(images)
 
-Transforms, all opt-out:
+What enable_speedup changes, all opt-out:
   fast_mask_downsample  the decoder's per-layer mask -> attention-mask bilinear downsample as four
                  strided slices; bitwise identical, and was ~30% of a long clip's forward
-  merge_lora     fold every backbone LoRA adapter into its base Linear (one matmul instead of three)
-  bf16_weights   keep BF16 copies of the frozen backbone matmul weights, so autocast stops
-                 re-casting ~2 GB of FP32 weights on every forward; registered parameters stay FP32
+  bf16_weights   keep BF16 copies of the frozen aggregator matmul weights, so BF16 autocast stops
+                 re-casting ~2 GB of FP32 weights on every forward; registered parameters stay FP32.
+                 The LoRA adapters are left as they are (not merged, not cast), so
+                 set_lora_enabled() keeps working
   compile        torch.compile the DINO patch-embed blocks and the frame / inter-frame blocks
                  (fixed shapes, precision-preserving Inductor options)
 
-fast_mask_downsample and GraphRunner are exact; pass exact=True to use only those. The others
-change floating-point order, so masks can differ at threshold ties (~99.7% of pixels keep their
-instance). GraphRunner replays a captured CUDA graph while its input shape remains cached. Cache
-misses pay warm-up and capture, plus compilation for new shapes in full mode, so graphs only pay
-off when shapes repeat before eviction. A shape whose capture runs out of memory runs without a
-graph from then on. Outputs of a
-replay alias the graph's static buffers and are overwritten by the next call on that shape --
-clone them if you keep more than one.
+LoRA is never merged into the backbone weights: the LoRA-off path (the original VGGT-Omega
+backbone, used for geometry) stays available after enable_speedup.
+
+fast_mask_downsample, bf16_weights and GraphRunner are exact. compile changes floating-point order,
+so masks can differ at threshold ties. GraphRunner replays a captured CUDA graph while its input
+shape (and LoRA state) remains cached. Cache misses pay warm-up, capture and compilation of new
+shapes, so graphs only pay off when shapes repeat before eviction. A shape whose capture runs out of
+memory runs without a graph from then on. Outputs of a replay alias the graph's static buffers and are
+overwritten by the next call on that shape -- clone them if you keep more than one.
 """
 from __future__ import annotations
 
@@ -38,23 +41,6 @@ COMPILE_OPTIONS = {"triton.cudagraphs": False, "max_autotune": False,
                    "force_same_precision": True, "emulate_precision_casts": True}
 
 
-def merge_lora(model: nn.Module) -> int:
-    """Replace each LoRALinear with its base Linear holding W + scaling * B @ A (FP32)."""
-    merged = 0
-    for parent in list(model.modules()):
-        for name, child in list(parent.named_children()):
-            if not isinstance(child, LoRALinear):
-                continue
-            base = child.base
-            if child.enabled:
-                with torch.no_grad():
-                    delta = (child.lora_b.weight.float() @ child.lora_a.weight.float()) * child.scaling
-                    base.weight.add_(delta.to(base.weight.dtype))
-            setattr(parent, name, base)
-            merged += 1
-    return merged
-
-
 def _bf16_linear(self, x):
     return F.linear(x, self._bf16_weight, self._bf16_bias)
 
@@ -63,13 +49,20 @@ def _bf16_conv(self, x):
     return self._conv_forward(x, self._bf16_weight, self._bf16_bias)
 
 
-def cache_bf16_weights(backbone: nn.Module) -> int:
-    """BF16 operands for backbone Linear/Conv2d, matching what BF16 autocast would compute.
+def cache_bf16_weights(aggregator: nn.Module) -> int:
+    """BF16 operands for the aggregator's frozen Linear/Conv2d, matching what BF16 autocast computes.
 
-    Only valid under BF16 autocast with a frozen model; the backbone always runs that way.
+    Only valid under BF16 autocast with a frozen model; the aggregator always runs that way. The LoRA
+    adapters (lora_a / lora_b of every LoRALinear) are skipped; the frozen base Linear inside a
+    LoRALinear is cached like any other frozen weight. The geometry heads are outside the aggregator
+    and run in FP32, so they are not touched.
     """
+    adapters = {id(m) for lora in aggregator.modules() if isinstance(lora, LoRALinear)
+                for m in (lora.lora_a, lora.lora_b)}
     cached = 0
-    for module in backbone.modules():
+    for module in aggregator.modules():
+        if id(module) in adapters:
+            continue
         if type(module) not in (nn.Linear, nn.Conv2d) and type(module).__name__ != "LinearKMaskedBias":
             continue
         with torch.no_grad():
@@ -124,25 +117,18 @@ def compile_backbone_blocks(backbone: nn.Module) -> int:
     return len(blocks)
 
 
-def optimize_for_inference(model: nn.Module, *, exact: bool = False, merge_lora_adapters: bool = True,
-                           bf16_weights: bool = True, compile: bool = True,
-                           fast_mask_downsample: bool = True) -> dict:
-    """Apply the streaming service's inference transforms in place. Irreversible; eval-only."""
+def enable_speedup(model: nn.Module, *, fast_mask_downsample: bool = True, bf16_weights: bool = True,
+                   compile: bool = True) -> dict:
+    """Apply the inference speedups in place (see the module docstring). Irreversible; eval-only.
+    The LoRA adapters are not modified."""
     if model.training:
-        raise ValueError("optimize_for_inference requires model.eval()")
-    if exact:
-        merge_lora_adapters = bf16_weights = compile = False
+        raise ValueError("enable_speedup requires model.eval()")
     model.requires_grad_(False)
-    report = {"merged_lora": 0, "bf16_weight_modules": 0, "compiled_blocks": 0,
-              "fast_mask_downsample": fast_mask_downsample}
+    report = {"fast_mask_downsample": fast_mask_downsample, "bf16_weight_modules": 0, "compiled_blocks": 0}
     if fast_mask_downsample:
         model.query_decoder._attn_mask_from_logits = MethodType(_attn_mask_exact_downsample, model.query_decoder)
-    if merge_lora_adapters:
-        report["merged_lora"] = merge_lora(model.backbone)
     if bf16_weights:
-        if not merge_lora_adapters and any(isinstance(m, LoRALinear) for m in model.backbone.modules()):
-            raise ValueError("bf16_weights needs merged adapters")
-        report["bf16_weight_modules"] = cache_bf16_weights(model.backbone)
+        report["bf16_weight_modules"] = cache_bf16_weights(model.backbone.aggregator)
     if compile:
         report["compiled_blocks"] = compile_backbone_blocks(model.backbone)
     return report
@@ -168,8 +154,15 @@ def run(model: nn.Module, images: torch.Tensor) -> dict:
             return model(images)
 
 
+def _lora_state(model: nn.Module) -> tuple:
+    return tuple(m.enabled for m in model.modules() if isinstance(m, LoRALinear))
+
+
 class GraphRunner:
-    """Bounded per-shape CUDA graph cache around model(images) under BF16 autocast."""
+    """Bounded per-shape CUDA graph cache around model(images) under BF16 autocast.
+
+    The cache key includes the LoRA enabled flags, so toggling LoRA never replays a graph captured
+    in the other state."""
 
     def __init__(self, model: nn.Module, capacity: int = 4, warmup: int = 2):
         self.model, self.capacity, self.warmup = model, capacity, warmup
@@ -187,7 +180,7 @@ class GraphRunner:
             # Blocking CPU feature transfers must stay outside CUDA capture.
             self.graphs.clear()
             return self._forward(images)
-        key = (tuple(images.shape), images.dtype, images.device)
+        key = (tuple(images.shape), images.dtype, images.device, _lora_state(self.model))
         if key in self.ungraphed:
             torch.cuda.empty_cache()               # these shapes sit near the memory limit
             return self._forward(images)
