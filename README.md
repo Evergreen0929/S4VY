@@ -100,11 +100,25 @@ python grounding/run_pipeline_video.py --grounder <g> --critic <c> ...   # video
 `demo/forward_video.py` and `demo/grounding_video.py` are self-contained: they pull the weights
 from Hugging Face and need only a video file.
 
-**Not in the paper.** `infer_segmenter.py` and `demo/forward_video.py` have two switches added
-after the paper, both on by default: `--mask-id-enhance` (each pixel goes to the most confident
-query instead of the paper's area-ordered mask painting) and `--speedup` (`torch.compile` and
-cached BF16 weights; the LoRA adapters are not merged). To reproduce the paper's outputs exactly,
-pass `--speedup off --mask-id-enhance off`. See [docs/INFERENCE.md](docs/INFERENCE.md).
+### Extra parameters
+
+`infer_segmenter.py` and `demo/forward_video.py` take these extra parameters, which are not part of
+the paper. Both switches are on by default; pass `--speedup off --mask-id-enhance off` to reproduce
+the paper's outputs exactly.
+
+- `--mask-id-enhance on|off`: how the 400 query masks are merged into one instance-id map. `on`
+  gives each pixel to the query with the highest P(object) × P(mask), so a small object in front of
+  a larger mask keeps its pixels. `off` is the paper's decoder, which paints the masks in order of
+  area, so the larger mask wins where two overlap.
+- `--speedup on|off`: faster inference with the same weights, using `torch.compile` on the backbone
+  blocks, cached BF16 weights and an exact attention-mask downsample. The LoRA adapters are not
+  merged, so `set_lora_enabled(False)` still gives the original VGGT-Ω geometry. Compilation changes
+  floating-point order, so a few pixels can change instance, and each new clip shape is compiled on
+  its first call.
+- `--cuda-graph` (`infer_segmenter.py` only, off by default): with `--speedup on`, also replays a CUDA
+  graph for repeated clip shapes. It is about 1–5% faster, but the cached graphs hold extra GPU memory.
+
+Accuracy, speed and memory for each setting are in [docs/INFERENCE.md](docs/INFERENCE.md).
 
 ## Data
 
