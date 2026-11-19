@@ -9,7 +9,7 @@ What enable_speedup changes, all opt-out:
   fast_mask_downsample  the decoder's per-layer mask -> attention-mask bilinear downsample as four
                  strided slices; bitwise identical, and was ~30% of a long clip's forward
   bf16_weights   keep BF16 copies of the frozen aggregator matmul weights, so BF16 autocast stops
-                 re-casting ~2 GB of FP32 weights on every forward; registered parameters stay FP32.
+                 re-casting 3.6 GB of FP32 weights on every forward (1.8 GB of BF16 copies); registered parameters stay FP32.
                  The LoRA adapters are left as they are (not merged, not cast), so
                  set_lora_enabled() keeps working
   compile        torch.compile the DINO patch-embed blocks and the frame / inter-frame blocks

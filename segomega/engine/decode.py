@@ -119,7 +119,13 @@ def masks_to_idmap_paper(objectness, mask_logits, out_hw, score_thr=0.3, mask_th
     """
     Ho, Wo = out_hw
     S = mask_logits.shape[2]
-    scores, masks = decode_instances(objectness, mask_logits, score_thr=score_thr, mask_thr=mask_thr)[0]
+    # decode_instances(...)[0] restricted to queries above score_thr before any mask work: identical
+    # results (elementwise ops, same query order), but memory scales with the kept queries, not all 400.
+    scores_all = objectness[0].softmax(-1)[:, 0]
+    cand = (scores_all > score_thr).nonzero().squeeze(1)
+    masks = mask_logits[0, cand].sigmoid() > mask_thr
+    ok = masks.flatten(1).sum(-1) > 10                          # decode_instances' min_pixels
+    scores, masks = scores_all[cand][ok], masks[ok]
     if masks.numel() == 0:
         return np.zeros((S, Ho, Wo), np.int32), np.zeros((0,), np.float32)
     up = F.interpolate(masks.float().reshape(-1, 1, *masks.shape[-2:]), size=(Ho, Wo),
@@ -144,18 +150,19 @@ def masks_to_idmap_owned(objectness, mask_logits, out_hw, score_thr=0.1, mask_th
     """
     Ho, Wo = out_hw
     scores = objectness[0].float().softmax(-1)[:, 0]
-    logits = mask_logits[0].float()
-    S = logits.shape[1]
+    S = mask_logits.shape[2]
     keep = (scores > score_thr).nonzero().squeeze(1)
+    logits = mask_logits[0, keep].float()                       # only the kept queries are ever read
     idmap = torch.zeros((S, Ho, Wo), dtype=torch.int32, device=logits.device)
+    eligible = torch.zeros_like(scores, dtype=torch.bool)
     if keep.numel():
         rank = scores[keep, None, None]
         for f in range(S):                                      # one frame at a time bounds memory
-            prob = F.interpolate(logits[keep, f, None], size=(Ho, Wo), mode="bilinear",
+            prob = F.interpolate(logits[:, f, None].contiguous(), size=(Ho, Wo), mode="bilinear",
                                  align_corners=False)[:, 0].sigmoid()
             best, index = torch.where(prob > mask_thr, rank * prob, -torch.inf).max(0)
             idmap[f] = torch.where(torch.isfinite(best), keep[index] + 1, 0)
-    eligible = (scores > score_thr) & (logits.sigmoid() > mask_thr).flatten(1).any(1)
+        eligible[keep] = (logits.sigmoid() > mask_thr).flatten(1).any(1)
     return idmap.cpu().numpy(), torch.where(eligible, scores, 0).cpu().numpy()
 
 
