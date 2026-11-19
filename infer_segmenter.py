@@ -3,7 +3,8 @@
 so paper-aligned metrics (T-mIoU/T-SR/J&F via score_metrics.py) compare segmenter vs baselines apples-to-apples.
 
 Two independent switches, both ON by default and both NOT part of the paper:
-  --speedup on|off          faster inference (segomega/engine/fast_inference.py); LoRA is never merged
+  --speedup on|off          faster inference (segomega/engine/fast_inference.py); LoRA is never merged.
+                            CUDA graphs are a separate opt-in (--cuda-graph): they hold extra GPU memory
   --mask-id-enhance on|off  owned id-map decoding (masks_to_idmap_owned) instead of the paper's decoder
 With both off (and the default --input-long-side native) this reproduces the paper's run exactly.
 """
@@ -23,7 +24,7 @@ CKPT = os.environ.get("S4VY_CKPT", "/PATH/TO/checkpoints/S4VY/s4vy/segomega_fina
 OUT_NAME = os.environ.get("DUMP_NAME", "segmenter")   # <name>.npz per clip
 
 
-def build(speedup=True, low_memory=False, offload_backbone=False):
+def build(speedup=True, cuda_graph=False, low_memory=False, offload_backbone=False):
     m = SegOmega(ckpt_path=os.environ.get("VGGT_OMEGA_CKPT"), num_queries=400, num_dec_layers=9, mask_dim=256,
                  dec_dim=256, supervise_depth=False, supervise_camera=False, use_teacher=False,
                  grad_checkpointing=True, load_pretrained=True, mask_feat_ratio=4)
@@ -32,10 +33,11 @@ def build(speedup=True, low_memory=False, offload_backbone=False):
     m = m.cuda().eval()
     if low_memory or offload_backbone:
         configure_inference_memory(m, offload_backbone=offload_backbone)
-    if not speedup:
-        return m
-    enable_speedup(m)
-    return GraphRunner(m, capacity=2)   # benchmark clips repeat a few shapes
+    if speedup:
+        enable_speedup(m)
+    # CUDA graphs: opt-in. Each cached graph keeps its own memory pool (two 100-frame native graphs held
+    # ~30 GB and ran an 80 GB A100 out of memory), for a few percent of speed on repeated clip shapes.
+    return GraphRunner(m, capacity=2) if (speedup and cuda_graph) else m
 
 
 def load_clip(cdir, long_side="native"):
@@ -79,8 +81,11 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(); ap.add_argument("--root", default="/PATH/TO/data/baseline_eval")
     ap.add_argument("--benches", default="iggt_tracking,davis,ytvos,vipseg")
     ap.add_argument("--speedup", type=on_off, default=True, metavar="{on,off}",
-                    help="on (default): exact mask downsample, BF16 weight cache, torch.compile, CUDA graphs; "
-                         "LoRA is not merged. off: the paper's plain eager forward. Not part of the paper.")
+                    help="on (default): exact mask downsample, BF16 weight cache, torch.compile; LoRA is not "
+                         "merged. off: the paper's plain eager forward. Not part of the paper.")
+    ap.add_argument("--cuda-graph", action="store_true",
+                    help="with --speedup on: also replay a CUDA graph per repeated clip shape (two shapes cached). "
+                         "Off by default: the cached graphs hold extra GPU memory")
     ap.add_argument("--mask-id-enhance", type=on_off, default=True, metavar="{on,off}",
                     help="on (default): owned decoding, each pixel goes to the most confident query. "
                          "off: the paper's decoder (area-ordered paint). Not part of the paper.")
@@ -89,8 +94,8 @@ if __name__ == "__main__":
     ap.add_argument("--low-memory", action="store_true", help="discard unused inference auxiliaries and pyramid features")
     ap.add_argument("--offload-backbone", action="store_true", help="also store cached features in CPU RAM; disables CUDA graph capture")
     args = ap.parse_args()
-    model = build(args.speedup, args.low_memory, args.offload_backbone)
-    print(f"[{OUT_NAME}] speedup={'on' if args.speedup else 'off'} "
+    model = build(args.speedup, args.cuda_graph, args.low_memory, args.offload_backbone)
+    print(f"[{OUT_NAME}] speedup={'on' if args.speedup else 'off'} cuda_graph={args.cuda_graph and args.speedup} "
           f"mask_id_enhance={'on' if args.mask_id_enhance else 'off'} input={args.input_long_side}", flush=True)
     for b in args.benches.split(","):
         cds = sorted(glob.glob(os.path.join(args.root, b, "clip_*")))
