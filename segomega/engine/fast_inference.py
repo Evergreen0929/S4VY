@@ -37,7 +37,10 @@ import torch.nn.functional as F
 
 from ..models.lora import LoRALinear
 
-COMPILE_OPTIONS = {"triton.cudagraphs": False, "max_autotune": False,
+# pattern_matcher off: with the LoRA adapters left unmerged, PyTorch 2.5's post-grad int8 weight-only
+# quantization pattern matches LoRA's `lora_b(...) * scaling` (a Python float) and crashes reading
+# `scales.meta`. Disabling the pattern passes only skips graph rewrites; it does not change the math.
+COMPILE_OPTIONS = {"triton.cudagraphs": False, "max_autotune": False, "pattern_matcher": False,
                    "force_same_precision": True, "emulate_precision_casts": True}
 
 
