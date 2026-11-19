@@ -131,8 +131,8 @@ P(mask) > 0.65; pixels with no such query are background. Overlaps are therefore
 confidence instead of by area, so a small object in front of a larger mask is no longer painted
 over. Ids are query index + 1, so an id names the same query in every frame of one model call. The
 gain comes from the ownership rule, not the lower P(object) threshold: at P(object) > 0.3 it
-predicts as many instances as the paper's decoder and no score in the table below moves by more
-than 1.0.
+predicts only 2–10% more instances than the paper's decoder (15–45% more at 0.1) and no score in
+the table below moves by more than 1.0.
 
 **`--speedup`** (`segomega/engine/fast_inference.py`) leaves the model's weights and the LoRA
 adapters as they are. LoRA is not merged into the backbone, so `set_lora_enabled(False)` still

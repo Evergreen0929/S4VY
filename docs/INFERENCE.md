@@ -85,8 +85,8 @@ off the code reproduces it bitwise. Values are ×100.
 crowded scenes (LVOS, VISOR, VIPSeg mAP), where large masks used to paint over smaller objects.
 Metrics that charge false positives rise too (VIPSeg thing mAP, STQ's association term AQ), so the
 gain is not bought with extra predictions. At the decoder's default P(object) > 0.1 it predicts
-15–35% more instances than the paper's decoder; at P(object) > 0.3 the count matches the paper's
-and no score moves by more than 1.0 (KITTI-STEP, −1.0), so the gain comes from the ownership rule,
+15–45% more instances per clip than the paper's decoder; at P(object) > 0.3 it predicts only 2–10%
+more, and no score moves by more than 1.0 (KITTI-STEP, −1.0), so the gain comes from the ownership rule,
 not the threshold.
 
 `--speedup` changes scores only through `torch.compile`'s floating-point order. With the owned
